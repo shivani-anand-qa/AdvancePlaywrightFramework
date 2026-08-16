@@ -2,6 +2,17 @@
 
 A TypeScript-based end-to-end and API test automation framework built on [Playwright](https://playwright.dev/), designed for multi-environment execution (dev, QA, staging, production) with a page-object-friendly structure, custom reporting, and CI integration via GitHub Actions.
 
+## Status
+
+The framework's core scaffolding is implemented and working end to end for the login flow:
+
+- `BasePage` + `UtilElementLocator` (action/wait helpers) + `logger` (Winston, console + `logs/combined.log`)
+- `LoginPage`, exercised by `src/tests/login.spec.ts` against the TTACart demo app (standard + locked-out user flows)
+- `CustomReporter` — a self-contained HTML report (`test-results/custom-report/index.html`) with filterable/sortable results, per-step timing, console logs, and screenshot/video/trace links, in addition to the built-in `html`/`list` reporters
+- `DataGenerator` — Faker-backed credentials/checkout data helpers
+
+Still placeholders (empty files, to be built out): `CartPage`, `CheckoutStepOne`, `CheckoutStepTwo`, `CheckoutCompletePage`, `InventoryPage`, `ItemDetailPage`, plus the `src/api/`, `src/config/`, `src/fixtures/`, and `src/testdata/` directories.
+
 ## Tech Stack
 
 - **Playwright** (`@playwright/test`) — browser automation and test runner
@@ -92,6 +103,12 @@ Run against a specific environment:
 TTA_ENV=stg npx playwright test
 ```
 
+Run a single spec file:
+
+```bash
+npx playwright test src/tests/login.spec.ts
+```
+
 View the HTML report after a run:
 
 ```bash
@@ -102,8 +119,9 @@ npx playwright show-report
 
 - **HTML reporter** — built-in Playwright report (`playwright-report/`)
 - **List reporter** — console output
-- **Custom reporter** — `src/utils/CustomReporter.ts`
+- **Custom reporter** — `src/utils/CustomReporter.ts`, writes a self-contained report to `test-results/custom-report/index.html` (plus a `results.json` alongside it) with summary cards, priority/status/tag filters, per-test steps and console logs, and links to each test's screenshot/video/trace
 - **Screenshots** on failure, **video** and **trace** on every run
+- **Logging** — Winston-based (`src/utils/logger.ts`); writes to the console and to `logs/combined.log`, level controlled by `LOG_LEVEL`
 
 ## Continuous Integration
 

@@ -9,3 +9,9 @@ node_modules/
 /blob-report/
 /playwright/.cache/
 /playwright/.auth/
+
+# Logs
+logs/
+
+# OS
+.DS_Store
