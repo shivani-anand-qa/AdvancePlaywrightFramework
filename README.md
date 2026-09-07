@@ -1,17 +1,30 @@
 # Advanced Playwright Framework
 
-A TypeScript-based end-to-end and API test automation framework built on [Playwright](https://playwright.dev/), designed for multi-environment execution (dev, QA, staging, production) with a page-object-friendly structure, custom reporting, and CI integration via GitHub Actions.
+A TypeScript-based end-to-end and API test automation framework built on [Playwright](https://playwright.dev/), designed for multi-environment execution (dev, QA, staging, production) with a page-object-friendly structure, custom fixtures, custom reporting, and CI integration via GitHub Actions.
 
 ## Status
 
-The framework's core scaffolding is implemented and working end to end for the login flow:
+The framework is built out end to end against the TTACart demo app:
 
 - `BasePage` + `UtilElementLocator` (action/wait helpers) + `logger` (Winston, console + `logs/combined.log`)
-- `LoginPage`, exercised by `src/tests/login.spec.ts` against the TTACart demo app (standard + locked-out user flows)
-- `CustomReporter` — a self-contained HTML report (`test-results/custom-report/index.html`) with filterable/sortable results, per-step timing, console logs, and screenshot/video/trace links, in addition to the built-in `html`/`list` reporters
-- `DataGenerator` — Faker-backed credentials/checkout data helpers
+- Page objects for the full shopping flow: `LoginPage`, `InventoryPage`, `ItemDetailPage`, `CartPage`, `CheckoutStepOne`, `CheckoutStepTwo`, `CheckoutCompletePage`
+- `src/fixtures/test-base.ts` — a custom `test` extending Playwright's, pre-wired with one fixture per page object plus reusable state fixtures (`invalidLogin`, `validLogin`, `loginWithInventory`, `loginWithSelectedItem`) so specs can skip repeating login/navigation boilerplate
+- `src/config/env.ts` / `src/config/credentials.ts` / `src/config/screenshotFlag.ts` — typed env var access, test credentials, and the `ATTACH_SCREENSHOTS` flag
+- `src/utils/visualStep.ts` — a `test.step` wrapper that optionally attaches a screenshot per step (gated by `ATTACH_SCREENSHOTS`) for the custom reporter to pick up
+- `src/utils/DataGenerator.ts` — Faker-backed credentials/checkout data helpers
+- `CustomReporter` — a self-contained HTML report (`tta-report/report_<runId>.html`) with filterable/sortable results, per-step timing, console logs, screenshot/video/trace links, run history, and lightweight AI-assisted failure/flaky analysis (see below), in addition to the built-in `html`/`list` reporters
+- Specs: `src/tests/login/login.spec.ts` (standard + locked-out user), and `src/tests/e2e/` (browse & cart, checkout, fixture-driven flows)
 
-Still placeholders (empty files, to be built out): `CartPage`, `CheckoutStepOne`, `CheckoutStepTwo`, `CheckoutCompletePage`, `InventoryPage`, `ItemDetailPage`, plus the `src/api/`, `src/config/`, `src/fixtures/`, and `src/testdata/` directories.
+Still a placeholder: `src/api/` (empty).
+
+### AI-assisted reporting (`src/ai/`)
+
+`CustomReporter` calls into `src/ai/agents/`:
+- `rcaAgent.ts` — rule-based root-cause analysis of a failure's error/stack (timeouts, strict-mode violations, network errors, missing locators, assertion mismatches), returning a severity/priority/root-cause/fix-suggestions verdict.
+- `flakyAnalyzer.ts` — diffs two run summaries (`reports/runs/run-*.json`) to flag tests whose status changed between runs.
+- `config/providers.ts` — `hasApiKey()` checks for `ANTHROPIC_API_KEY`; when present the reporter includes an AI-generated flaky summary in addition to the rule-based analysis.
+
+This is heuristic/local analysis only — no network calls are made unless `ANTHROPIC_API_KEY` is set.
 
 ## Tech Stack
 
@@ -29,20 +42,25 @@ Still placeholders (empty files, to be built out): `CartPage`, `CheckoutStepOne`
 
 ```
 ├── src/
-│   ├── api/          # API clients / request wrappers
-│   ├── config/        # Environment & framework configuration
-│   ├── fixtures/       # Custom Playwright fixtures
-│   ├── pages/         # Page Object Model classes
+│   ├── ai/             # Local RCA + flaky-test analysis used by CustomReporter
+│   │   ├── agents/     # rcaAgent, flakyAnalyzer
+│   │   └── config/     # providers (ANTHROPIC_API_KEY detection)
+│   ├── api/            # API clients / request wrappers (placeholder)
+│   ├── config/         # env.ts, credentials.ts, screenshotFlag.ts
+│   ├── fixtures/       # test-base.ts — custom `test` with page-object + state fixtures
+│   ├── pages/          # Page Object Model classes
 │   ├── testdata/       # Test data files (JSON/CSV/XLSX)
-│   ├── tests/          # Spec files
-│   └── utils/          # Shared utilities (e.g. CustomReporter)
-├── docs/               # Project documentation
-├── rules/              # Project/test rules or standards
+│   ├── tests/
+│   │   ├── login/      # Login spec(s)
+│   │   └── e2e/        # Browse/cart/checkout spec(s)
+│   └── utils/          # CustomReporter, DataGenerator, UtilElementLocator, logger, visualStep
 ├── .github/workflows/  # CI pipeline (GitHub Actions)
 ├── playwright.config.ts
 ├── tsconfig.json
 └── .env                # Local environment variables (not committed)
 ```
+
+Generated at test-run time (git-ignored, not part of the repo): `tta-report/` (custom HTML reports, screenshots/videos/traces) and `reports/runs/` (per-run JSON summaries used by the flaky analyzer).
 
 ## Path Aliases
 
@@ -74,6 +92,10 @@ TEST_ENV=QA
 TEST_AUTHOR=
 USERNAME=
 PASSWORD=
+STANDARD_USER=             # defaults to standard_user (src/config/credentials.ts)
+TTA_SECRET=                # defaults to tta_secret (src/config/credentials.ts)
+ATTACH_SCREENSHOTS=false   # true to attach a screenshot to each visualStep in the report
+ANTHROPIC_API_KEY=         # optional — enables the AI-generated flaky-test summary in CustomReporter
 ```
 
 `.env` is git-ignored and must never be committed.
@@ -106,7 +128,13 @@ TTA_ENV=stg npx playwright test
 Run a single spec file:
 
 ```bash
-npx playwright test src/tests/login.spec.ts
+npx playwright test src/tests/login/login.spec.ts
+```
+
+Run a single test by name:
+
+```bash
+npx playwright test -g "has title"
 ```
 
 View the HTML report after a run:
@@ -115,12 +143,14 @@ View the HTML report after a run:
 npx playwright show-report
 ```
 
+There is no lint or typecheck script configured; `tsc` is not wired up beyond the `tsconfig.json` used implicitly by Playwright's TypeScript support.
+
 ## Reporting
 
 - **HTML reporter** — built-in Playwright report (`playwright-report/`)
 - **List reporter** — console output
-- **Custom reporter** — `src/utils/CustomReporter.ts`, writes a self-contained report to `test-results/custom-report/index.html` (plus a `results.json` alongside it) with summary cards, priority/status/tag filters, per-test steps and console logs, and links to each test's screenshot/video/trace
-- **Screenshots** on failure, **video** and **trace** on every run
+- **Custom reporter** — `src/utils/CustomReporter.ts`, writes a self-contained report to `tta-report/report_<runId>.html` (plus per-run JSON under `reports/runs/`) with summary cards, priority/status/tag filters, per-test steps and console logs, links to each test's screenshot/video/trace, run history, and RCA/flaky-test analysis (see [AI-assisted reporting](#ai-assisted-reporting-srcai))
+- **Screenshots** on failure (plus per-step, when `ATTACH_SCREENSHOTS=true`), **video** and **trace** on every run
 - **Logging** — Winston-based (`src/utils/logger.ts`); writes to the console and to `logs/combined.log`, level controlled by `LOG_LEVEL`
 
 ## Continuous Integration

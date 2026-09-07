@@ -13,5 +13,12 @@ node_modules/
 # Logs
 logs/
 
+# Custom reporter output
+/tta-report/
+/reports/
+
+# Local tool state
+.commandcode/
+
 # OS
 .DS_Store

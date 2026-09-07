@@ -1,5 +1,6 @@
 import { defineConfig, devices } from '@playwright/test';
 import dotenv from 'dotenv';
+import { ATTACH_SCREENSHOTS } from './src/config/screenshotFlag';
 
 dotenv.config();
 
@@ -26,7 +27,6 @@ function resolveBaseURL(): string {
 
 }
 
-
 export default defineConfig({
   testDir: './src/tests',
 
@@ -48,7 +48,8 @@ export default defineConfig({
 
   use: {
     baseURL: resolveBaseURL(),
-    screenshot: 'only-on-failure',
+    headless: true,
+    screenshot: ATTACH_SCREENSHOTS ? 'only-on-failure' : 'off',
     video: 'on',
     trace: 'on'
   },
@@ -57,7 +58,9 @@ export default defineConfig({
     {
       name: 'chromium',
       use: {
-        ...devices['Desktop Chrome']
+        ...devices['Desktop Chrome'],
+        viewport: { width: 1920, height: 1080 }
+
       }
     }
   ]

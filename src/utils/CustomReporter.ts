@@ -1,812 +1,2263 @@
-import type { Reporter, FullConfig, FullResult, Suite, TestCase, TestStep, TestResult } from '@playwright/test/reporter';
-import fs from 'fs';
-import path from 'path';
+/**
+ * Custom TTA Reporter for Playwright
+ * @author Pramod Dutta
+ * @website https://thetestingacademy.com
+ * @version 1.0.0
+ * @description Custom HTML Reporter for Playwright Test Automation Framework
+ */
 
-type Outcome = 'expected' | 'unexpected' | 'flaky' | 'skipped';
+import {
+    FullConfig,
+    FullResult,
+    Reporter,
+    Suite,
+    TestCase,
+    TestResult,
+    TestStep,
+} from '@playwright/test/reporter';
+import * as fs from 'fs';
+import * as path from 'path';
+import { analyzeFailure, type RcaVerdict } from '../ai/agents/rcaAgent';
+import { analyzeFlaky, type BuildSummary, type FlakyResult } from '../ai/agents/flakyAnalyzer';
+import { hasApiKey } from '../ai/config/providers';
 
-interface TestStepRecord {
+export interface StepData {
     title: string;
-    durationMs: number;
-    status: 'pass' | 'fail';
+    category: string;
+    duration: number;
+    status: 'passed' | 'failed' | 'skipped';
+    screenshot?: string;
     error?: string;
-    startedAt: string;
-    videoRange?: string;
-    logs: string[];
+    stackTrace?: string;
+    startTime: string;
+    consoleLogs?: string[];
+    stepIndex?: number;
+    videoStartTime?: number;
+    videoEndTime?: number;
 }
 
-interface TestRecord {
-    seq: number;
-    suite: string;
+export interface TestData {
+    id: string;
     title: string;
-    author: string;
-    priority: string;
-    tags: string[];
+    fullTitle: string;
     file: string;
-    start: string;
-    end: string;
-    durationMs: number;
-    status: Outcome;
-    error?: string;
-    steps?: TestStepRecord[];
+    describePath: string[];
+    location: string;
+    duration: number;
+    status: 'passed' | 'failed' | 'skipped' | 'timedOut';
+    retry: number;
+    screenshots: { name: string; path: string }[];
+    steps: StepData[];
     logs: string[];
-    screenshotHref?: string;
-    videoHref?: string;
-    traceHref?: string;
+    video?: string;
+    trace?: string;
+    error?: string;
+    errorStack?: string;
+    tags: string[];
 }
 
-interface Summary {
+interface FileGroup {
+    file: string;
+    describes: Map<string, TestData[]>;
+    stats: { passed: number; failed: number; skipped: number; total: number };
+}
+
+export interface SuiteStats {
     total: number;
     passed: number;
     failed: number;
-    flaky: number;
     skipped: number;
-    passRate: string;
-    environment: string;
-    browser: string;
-    platform: string;
-    workers: number;
-    runId: string;
-    startedAt: string;
-    durationMs: number;
+    flaky: number;
 }
 
-interface CustomReporterOptions {
-    outputDir?: string;
-    outputFile?: string;
-}
-
-const ANSI = {
-    reset: '\x1b[0m',
-    bold: '\x1b[1m',
-    gray: '\x1b[90m',
-    red: '\x1b[31m',
-    green: '\x1b[32m',
-    yellow: '\x1b[33m',
-    cyan: '\x1b[36m',
-};
-
-function paint(text: string, code: string): string {
-    return code + text + ANSI.reset;
-}
-
-function pad(n: number): string {
-    return String(n).padStart(2, '0');
-}
-
-function formatRunId(date: Date): string {
-    return (
-        date.getFullYear() +
-        pad(date.getMonth() + 1) +
-        pad(date.getDate()) +
-        '_' +
-        pad(date.getHours()) +
-        pad(date.getMinutes()) +
-        pad(date.getSeconds())
-    );
-}
-
-function formatClockTime(date: Date): string {
-    return pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds());
-}
-
-function formatPlatform(): string {
-    switch (process.platform) {
-        case 'darwin':
-            return 'Mac';
-        case 'win32':
-            return 'Windows';
-        case 'linux':
-            return 'Linux';
-        default:
-            return process.platform;
-    }
-}
-
-function formatDuration(ms: number): string {
-    if (ms < 1000) return Math.round(ms) + 'ms';
-    return (ms / 1000).toFixed(2) + 's';
-}
-
-function stripAnsi(text: string): string {
-    return text.replace(/\x1b\[[0-9;]*m/g, '');
-}
-
-/** Formats a millisecond offset as m:ss.cc, clamped to zero (video/step timing can race by a few ms). */
-function formatTimeOffset(ms: number): string {
-    const totalCentis = Math.round(Math.max(0, ms) / 10);
-    const minutes = Math.floor(totalCentis / 6000);
-    const seconds = Math.floor((totalCentis % 6000) / 100);
-    const centis = totalCentis % 100;
-    return minutes + ':' + String(seconds).padStart(2, '0') + '.' + String(centis).padStart(2, '0');
-}
-
-function formatVideoRange(offsetMs: number, durationMs: number): string {
-    return formatTimeOffset(offsetMs) + ' - ' + formatTimeOffset(offsetMs + durationMs);
-}
-
-/** Playwright's own browser/context lifecycle bookkeeping — not useful in a step-by-step debug view. */
-const BOILERPLATE_STEP_TITLES = /^(Launch browser|Create context|Create page|Close context|Close browser|Close page)$/;
-
-/**
- * Flattens a test result's step tree into the entries worth showing. Prefers named `test.step()`
- * groups where the suite uses them (stops descending once it finds one, so its inner pw:api calls
- * don't also show up as separate rows); falls back to raw pw:api/expect calls otherwise.
- */
-function collectSteps(
-    steps: readonly TestStep[],
-    resultStartTime: Date,
-    getStepLogs: (step: TestStep) => string[]
-): TestStepRecord[] {
-    const out: TestStepRecord[] = [];
-    for (const step of steps) {
-        const isNamedStep = step.category === 'test.step';
-        const isAction = (step.category === 'pw:api' || step.category === 'expect') && !BOILERPLATE_STEP_TITLES.test(step.title);
-
-        if (isNamedStep || isAction) {
-            const offsetMs = step.startTime.getTime() - resultStartTime.getTime();
-            out.push({
-                title: step.title,
-                durationMs: step.duration,
-                status: step.error ? 'fail' : 'pass',
-                error: step.error ? stripAnsi(step.error.message ?? '') : undefined,
-                startedAt: formatClockTime(step.startTime),
-                videoRange: formatVideoRange(offsetMs, step.duration),
-                logs: getStepLogs(step),
-            });
-            if (!isNamedStep && step.steps.length) out.push(...collectSteps(step.steps, resultStartTime, getStepLogs));
-        } else if (step.steps.length) {
-            out.push(...collectSteps(step.steps, resultStartTime, getStepLogs));
-        }
-    }
-    return out;
-}
-
-function outcomeColor(outcome: Outcome): string {
-    switch (outcome) {
-        case 'expected':
-            return ANSI.green;
-        case 'flaky':
-            return ANSI.yellow;
-        case 'skipped':
-            return ANSI.gray;
-        case 'unexpected':
-        default:
-            return ANSI.red;
-    }
-}
-
-function outcomeIcon(outcome: Outcome): string {
-    switch (outcome) {
-        case 'expected':
-            return '✓';
-        case 'flaky':
-            return '⟳';
-        case 'skipped':
-            return '○';
-        case 'unexpected':
-        default:
-            return '✗';
-    }
-}
-
-export default class CustomReporter implements Reporter {
-    private readonly outputDir: string;
-    private readonly outputFile: string;
-    private suite!: Suite;
-    private config!: FullConfig;
-    private startTime = 0;
-    private runId = '';
-
-    // Console/log output is only handed to the reporter as it streams in (onStdOut/onStdErr), scoped
-    // to whichever test+step is currently running — buffer it here so buildRecords() can look it up
-    // per result / per step once the run is over.
-    private readonly resultLogs = new WeakMap<TestResult, string[]>();
-    private readonly stepLogs = new WeakMap<TestStep, string[]>();
-    private readonly openSteps = new WeakMap<TestResult, TestStep[]>();
-
-    constructor(options: CustomReporterOptions = {}) {
-        this.outputDir = options.outputDir ?? 'test-results/custom-report';
-        this.outputFile = options.outputFile ?? 'index.html';
-    }
+class CustomTTAReporter implements Reporter {
+    private testResults: TestData[] = [];
+    private fileGroups: Map<string, FileGroup> = new Map();
+    private suiteStats: SuiteStats = { total: 0, passed: 0, failed: 0, skipped: 0, flaky: 0 };
+    private config?: FullConfig;
+    // Meta used by the HTML when there is no Playwright FullConfig (e.g. a
+    // Cucumber run feeding the reporter via renderExternalRun).
+    private reportMeta?: { browser?: string; workers?: number };
+    private startTime: Date = new Date();
+    private endTime: Date = new Date();
+    private outputFile: string = 'tta-report/index.html';
+    private runId: string = '';
+    private testStepsMap: Map<string, StepData[]> = new Map();
+    private testStartTimeMap: Map<string, number> = new Map();
+    private testStepCounterMap: Map<string, number> = new Map();
+    private testCounter: number = 0;
+    private runningTests: Map<string, TestData> = new Map();
+    private completedTestIds: Set<string> = new Set();
+    // AI-generated test data captured from `ai-data` attachments (for the AI Data tab).
+    private aiData: { test: string; json: string }[] = [];
+    // RCA verdicts produced by the RCA AI agent for failed tests (AI Verdict tab).
+    private aiVerdicts: { test: string; file: string; verdict: RcaVerdict }[] = [];
+    // Flaky analysis comparing this build with the previous one (Flaky tab).
+    private flakyResult?: FlakyResult;
+    private prevBuildId?: string;
+    private currBuildId?: string;
 
     onBegin(config: FullConfig, suite: Suite): void {
+        const now = new Date();
+        this.runId = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}${String(now.getSeconds()).padStart(2, '0')}`;
+        this.outputFile = `tta-report/report_${this.runId}.html`;
         this.config = config;
-        this.suite = suite;
-        this.startTime = Date.now();
-        this.runId = formatRunId(new Date(this.startTime));
+        this.startTime = new Date();
+        const totalTests = suite.allTests().length;
 
-        const environment = (process.env.TTA_ENV || 'qa').toLowerCase();
-        const browser = config.projects[0]?.name ?? 'chromium';
-        const total = suite.allTests().length;
+        console.log('\n╔════════════════════════════════════════════════════════════════╗');
+        console.log('║        🎭 TTA PLAYWRIGHT AUTOMATION - REAL-TIME REPORT         ║');
+        console.log('╠════════════════════════════════════════════════════════════════╣');
+        console.log(`║  📅 Started: ${this.startTime.toLocaleString().padEnd(47)}║`);
+        console.log(`║  📊 Total Tests: ${String(totalTests).padEnd(44)}║`);
+        console.log(`║  🌐 Environment: ${(process.env.TEST_ENV || 'UAT').padEnd(44)}║`);
+        console.log('╚════════════════════════════════════════════════════════════════╝\n');
 
-        console.log('');
-        console.log(paint('─'.repeat(56), ANSI.cyan));
-        console.log(paint(' 🎭 Automation Report — Run Starting', ANSI.bold + ANSI.cyan));
-        console.log(paint('─'.repeat(56), ANSI.cyan));
-        console.log(' Environment : ' + paint(environment, ANSI.yellow));
-        console.log(' Browser     : ' + browser);
-        console.log(' Workers     : ' + config.workers);
-        console.log(' Run ID      : ' + this.runId);
-        console.log(' Tests       : ' + total);
-        console.log(paint('─'.repeat(56), ANSI.cyan));
-        console.log('');
+        this.initializeLiveReport();
     }
 
-    onTestEnd(test: TestCase): void {
-        const lastResult = test.results[test.results.length - 1];
-        if (!lastResult) return;
+    private initializeLiveReport(): void {
+        const reportDir = path.dirname(this.outputFile);
+        if (!fs.existsSync(reportDir)) {
+            fs.mkdirSync(reportDir, { recursive: true });
+        }
+        this.updateReportRealTime();
+        console.log(`📡 Real-time report: ${this.outputFile}`);
+    }
 
-        const outcome = test.outcome() as Outcome;
-        const icon = outcomeIcon(outcome);
-        const color = outcomeColor(outcome);
-        const fullTitle = test.titlePath().slice(3).join(' › ');
-        const retries = test.results.length - 1;
-        const retrySuffix = retries > 0 ? paint(' (' + retries + ' retries)', ANSI.yellow) : '';
+    onTestBegin(test: TestCase): void {
+        this.testStepsMap.set(test.id, []);
+        this.testStartTimeMap.set(test.id, Date.now());
+        this.testStepCounterMap.set(test.id, 0);
+        this.testCounter++;
 
-        console.log(
-            '  ' + paint(icon, color) + ' ' + fullTitle + retrySuffix + ' ' + paint(formatDuration(lastResult.duration), ANSI.gray)
+        const testFile = test.location.file.split('/').pop() || '';
+        console.log(`\n▶️  STARTING: ${test.title}`);
+        console.log(`   📁 File: ${testFile}`);
+        console.log(`   📍 Suite: ${test.parent.title}`);
+        console.log('   ─────────────────────────────────────────────────────');
+
+        const describePath: string[] = [];
+        let parent: { title: string; parent?: unknown } | undefined = test.parent;
+        while (parent && parent.title) {
+            describePath.unshift(parent.title);
+            parent = parent.parent as { title: string; parent?: unknown } | undefined;
+        }
+
+        this.runningTests.set(test.id, {
+            id: `running-${test.id}`,
+            title: test.title,
+            fullTitle: [...describePath, test.title].join(' › '),
+            file: test.location.file,
+            describePath: describePath,
+            location: `${test.location.file}:${test.location.line}`,
+            duration: 0,
+            status: 'passed',
+            retry: 0,
+            screenshots: [],
+            steps: [],
+            logs: [],
+            tags: test.tags || [],
+        });
+
+        this.updateReportRealTime();
+    }
+
+    onStepBegin(_test: TestCase, _result: TestResult, step: TestStep): void {
+        if (step.category === 'test.step') {
+            console.log(`   ⏳ ${step.title}...`);
+        }
+    }
+
+    onStepEnd(test: TestCase, _result: TestResult, step: TestStep): void {
+        if (step.category === 'test.step') {
+            const duration = step.duration ? `(${step.duration}ms)` : '';
+            const status = step.error ? '❌' : '✅';
+            console.log(`   ${status} ${step.title} ${duration}`);
+
+            const testStartTime = this.testStartTimeMap.get(test.id) || Date.now();
+            const stepCounter = this.testStepCounterMap.get(test.id) || 0;
+            const testSteps = this.testStepsMap.get(test.id) || [];
+
+            const stepStartTime = new Date(step.startTime).getTime();
+            const videoStartTime = stepStartTime - testStartTime;
+            const videoEndTime = videoStartTime + (step.duration || 0);
+
+            const stepData: StepData = {
+                title: step.title,
+                category: step.category,
+                duration: step.duration || 0,
+                status: step.error ? 'failed' : 'passed',
+                startTime: new Date(step.startTime).toLocaleTimeString(),
+                error: step.error?.message,
+                stackTrace: step.error?.stack,
+                consoleLogs: [],
+                stepIndex: stepCounter,
+                videoStartTime: Math.max(0, videoStartTime),
+                videoEndTime: Math.max(0, videoEndTime),
+            };
+            testSteps.push(stepData);
+            this.testStepsMap.set(test.id, testSteps);
+            this.testStepCounterMap.set(test.id, stepCounter + 1);
+
+            const runningTest = this.runningTests.get(test.id);
+            if (runningTest) {
+                runningTest.steps = [...testSteps];
+                this.runningTests.set(test.id, runningTest);
+            }
+
+            this.updateReportRealTime();
+        }
+    }
+
+    onTestEnd(test: TestCase, result: TestResult): void {
+        this.suiteStats.total++;
+
+        let status: 'passed' | 'failed' | 'skipped' | 'timedOut' = 'passed';
+        let statusIcon = '✅';
+        if (result.status === 'passed') {
+            this.suiteStats.passed++;
+            status = 'passed';
+            statusIcon = '✅';
+        } else if (result.status === 'failed' || result.status === 'timedOut') {
+            this.suiteStats.failed++;
+            status = result.status === 'timedOut' ? 'timedOut' : 'failed';
+            statusIcon = '❌';
+        } else {
+            this.suiteStats.skipped++;
+            status = 'skipped';
+            statusIcon = '⏭️';
+        }
+
+        const testTime = this.formatDuration(result.duration);
+
+        console.log('   ─────────────────────────────────────────────────────');
+        console.log(`   ${statusIcon} RESULT: ${status.toUpperCase()} | Duration: ${testTime}`);
+        if (result.error) {
+            console.log(`   ⚠️  Error: ${result.error.message?.substring(0, 80)}...`);
+        }
+        console.log(`\n   📊 Running Total: ✅ ${this.suiteStats.passed} | ❌ ${this.suiteStats.failed} | ⏭️ ${this.suiteStats.skipped}`);
+
+        const currentTestSteps = this.testStepsMap.get(test.id) || [];
+        const testLogs = this.collectTestLogs(result);
+        this.associateLogsWithSteps(test, result, currentTestSteps, testLogs);
+
+        const screenshots: { name: string; path: string }[] = [];
+        const stepScreenshots: Map<string, string> = new Map();
+        let videoPath: string | undefined;
+        let tracePath: string | undefined;
+
+        for (const attachment of result.attachments) {
+            if (attachment.contentType === 'image/png') {
+                const screenshotName = `screenshot_${this.testCounter}_${screenshots.length + 1}.png`;
+                const destPath = path.join('tta-report', 'screenshots', screenshotName);
+                const destDir = path.dirname(destPath);
+                if (!fs.existsSync(destDir)) {
+                    fs.mkdirSync(destDir, { recursive: true });
+                }
+                try {
+                    if (attachment.path) {
+                        fs.copyFileSync(attachment.path, destPath);
+                    } else if (attachment.body) {
+                        fs.writeFileSync(destPath, attachment.body);
+                    }
+                    screenshots.push({ name: attachment.name || `Screenshot ${screenshots.length + 1}`, path: `screenshots/${screenshotName}` });
+                    if (attachment.name) {
+                        stepScreenshots.set(attachment.name, `screenshots/${screenshotName}`);
+                    }
+                } catch {
+                    console.warn(`Failed to save screenshot: ${attachment.name}`);
+                }
+            }
+
+            if (attachment.contentType === 'video/webm' && attachment.path) {
+                const videoName = `video_${this.testCounter}.webm`;
+                const destPath = path.join('tta-report', 'videos', videoName);
+                const destDir = path.dirname(destPath);
+                if (!fs.existsSync(destDir)) {
+                    fs.mkdirSync(destDir, { recursive: true });
+                }
+                try {
+                    fs.copyFileSync(attachment.path, destPath);
+                    videoPath = `videos/${videoName}`;
+                } catch {
+                    console.warn(`Failed to copy video: ${attachment.path}`);
+                }
+            }
+
+            if (attachment.name === 'trace' && attachment.path) {
+                const traceName = `trace_${this.testCounter}.zip`;
+                const destPath = path.join('tta-report', 'traces', traceName);
+                const destDir = path.dirname(destPath);
+                if (!fs.existsSync(destDir)) {
+                    fs.mkdirSync(destDir, { recursive: true });
+                }
+                try {
+                    fs.copyFileSync(attachment.path, destPath);
+                    tracePath = `traces/${traceName}`;
+                } catch {
+                    console.warn(`Failed to copy trace: ${attachment.path}`);
+                }
+            }
+
+            // AI-generated test data (from generateTestData -> testInfo.attach('ai-data')).
+            if (attachment.name === 'ai-data' && attachment.contentType === 'application/json') {
+                try {
+                    const body = attachment.body
+                        ? attachment.body.toString()
+                        : attachment.path
+                            ? fs.readFileSync(attachment.path, 'utf-8')
+                            : '';
+                    if (body) {
+                        this.aiData.push({ test: test.title, json: body });
+                    }
+                } catch {
+                    console.warn('Failed to read ai-data attachment');
+                }
+            }
+        }
+
+        // Associate screenshots with steps
+        for (const step of currentTestSteps) {
+            for (const [name, screenshotPath] of stepScreenshots) {
+                const nameLower = name.toLowerCase();
+                const titleLower = step.title.toLowerCase();
+
+                const stepIndexPattern = `step-${step.stepIndex}-`;
+                if (nameLower.startsWith(stepIndexPattern)) {
+                    step.screenshot = screenshotPath;
+                    break;
+                }
+
+                const stepNumPattern1 = `step_${(step.stepIndex || 0) + 1}_`;
+                const stepNumPattern2 = `step ${(step.stepIndex || 0) + 1}`;
+                if (nameLower.includes(stepNumPattern1) || nameLower.includes(stepNumPattern2)) {
+                    step.screenshot = screenshotPath;
+                    break;
+                }
+
+                const cleanedName = nameLower.replace(/step[-_]?\d+[-_:]?/i, '').trim();
+                if (cleanedName && (titleLower.includes(cleanedName) || cleanedName.includes(titleLower.substring(0, 20)))) {
+                    step.screenshot = screenshotPath;
+                    break;
+                }
+            }
+        }
+
+        const describePath: string[] = [];
+        let parent: Suite | undefined = test.parent;
+        while (parent) {
+            if (parent.title) {
+                describePath.unshift(parent.title);
+            }
+            parent = parent.parent;
+        }
+
+        const tagMatches = test.title.match(/@\w+/g) || [];
+
+        const testData: TestData = {
+            id: `test-${test.id}`,
+            title: test.title,
+            fullTitle: [...describePath, test.title].join(' › '),
+            file: test.location.file,
+            describePath: describePath,
+            location: `${test.location.file.split('/').pop()}:${test.location.line}`,
+            duration: result.duration,
+            status: status,
+            retry: result.retry,
+            screenshots: screenshots,
+            steps: [...currentTestSteps],
+            logs: testLogs,
+            video: videoPath,
+            trace: tracePath,
+            error: result.error?.message,
+            errorStack: result.error?.stack,
+            tags: tagMatches,
+        };
+
+        this.testResults.push(testData);
+
+        const fileName = test.location.file;
+        if (!this.fileGroups.has(fileName)) {
+            this.fileGroups.set(fileName, {
+                file: fileName,
+                describes: new Map(),
+                stats: { passed: 0, failed: 0, skipped: 0, total: 0 },
+            });
+        }
+        const fileGroup = this.fileGroups.get(fileName)!;
+        fileGroup.stats.total++;
+        if (status === 'passed') fileGroup.stats.passed++;
+        else if (status === 'failed' || status === 'timedOut') fileGroup.stats.failed++;
+        else fileGroup.stats.skipped++;
+
+        const describeKey = describePath.join(' › ');
+        if (!fileGroup.describes.has(describeKey)) {
+            fileGroup.describes.set(describeKey, []);
+        }
+        fileGroup.describes.get(describeKey)!.push(testData);
+
+        this.runningTests.delete(test.id);
+        this.completedTestIds.add(test.id);
+
+        this.updateReportRealTime();
+    }
+
+    private updateReportRealTime(): void {
+        try {
+            const reportDir = path.dirname(this.outputFile);
+            if (!fs.existsSync(reportDir)) {
+                fs.mkdirSync(reportDir, { recursive: true });
+            }
+            const html = this.generateHTMLRealTime();
+            fs.writeFileSync(this.outputFile, html);
+        } catch (error) {
+            console.error('❌ Real-time report update failed:', error);
+        }
+    }
+
+    private generateHTMLRealTime(): string {
+        const inProgressTests = Array.from(this.runningTests.values());
+        const originalResults = this.testResults;
+        this.testResults = [...originalResults, ...inProgressTests];
+
+        let html = this.generateHTML();
+
+        this.testResults = originalResults;
+
+        html = html.replace(
+            '<meta charset="UTF-8">',
+            '<meta charset="UTF-8">\n    <meta http-equiv="refresh" content="5">',
         );
 
-        if (outcome === 'unexpected' && lastResult.errors[0]?.message) {
-            const firstLine = stripAnsi(lastResult.errors[0].message).split('\n')[0];
-            console.log(paint('      ↳ ' + firstLine, ANSI.red));
+        return html;
+    }
+
+    async onEnd(_result: FullResult): Promise<void> {
+        this.endTime = new Date();
+        const duration = this.formatDuration(this.endTime.getTime() - this.startTime.getTime());
+        const passRate = this.suiteStats.total > 0
+            ? ((this.suiteStats.passed / this.suiteStats.total) * 100).toFixed(1)
+            : '0';
+
+        console.log('\n╔════════════════════════════════════════════════════════════════╗');
+        console.log('║                    📊 FINAL TEST SUMMARY                        ║');
+        console.log('╠════════════════════════════════════════════════════════════════╣');
+        console.log(`║  ✅ Passed:  ${String(this.suiteStats.passed).padEnd(49)}║`);
+        console.log(`║  ❌ Failed:  ${String(this.suiteStats.failed).padEnd(49)}║`);
+        console.log(`║  ⏭️  Skipped: ${String(this.suiteStats.skipped).padEnd(49)}║`);
+        console.log(`║  📊 Total:   ${String(this.suiteStats.total).padEnd(49)}║`);
+        console.log('╠════════════════════════════════════════════════════════════════╣');
+        console.log(`║  ⏱️  Duration: ${duration.padEnd(47)}║`);
+        console.log(`║  📈 Pass Rate: ${(passRate + '%').padEnd(47)}║`);
+        console.log('╚════════════════════════════════════════════════════════════════╝');
+
+        await this.runRcaAnalysis();
+        await this.runFlakyAnalysis();
+
+        console.log('\n📊 Generating TTA HTML Report...');
+        await this.generateReport();
+        console.log(`✅ Report generated: ${this.outputFile}`);
+    }
+
+    /**
+     * Render a TTA report from an EXTERNAL run that does NOT flow through
+     * Playwright's Reporter callbacks (e.g. a Cucumber run via the custom
+     * formatter). The caller builds the same TestData[]/SuiteStats model and we
+     * reuse the exact same HTML + RCA + Flaky pipeline as a Playwright run.
+     *
+     * @returns the path of the generated report file.
+     */
+    async renderExternalRun(input: {
+        runId: string;
+        startTime: Date;
+        endTime: Date;
+        tests: TestData[];
+        stats: SuiteStats;
+        meta?: { browser?: string; workers?: number };
+    }): Promise<string> {
+        this.runId = input.runId;
+        this.outputFile = `tta-report/report_${input.runId}.html`;
+        this.startTime = input.startTime;
+        this.endTime = input.endTime;
+        this.testResults = input.tests;
+        this.suiteStats = input.stats;
+        this.reportMeta = input.meta;
+
+        await this.runRcaAnalysis();
+        await this.runFlakyAnalysis();
+        await this.generateReport();
+        return this.outputFile;
+    }
+
+    // RCA AI agent: analyze each failed test via the LLM gateway and store a verdict.
+    private async runRcaAnalysis(): Promise<void> {
+        const failures = this.testResults.filter(
+            (t) => t.status === 'failed' || t.status === 'timedOut',
+        );
+        if (failures.length === 0) return;
+        if (!hasApiKey()) {
+            console.log('🤖 RCA agent: no LLM API key set — skipping AI verdict.');
+            return;
+        }
+
+        const cap = 10;
+        const toAnalyze = failures.slice(0, cap);
+        if (failures.length > cap) {
+            console.log(`🤖 RCA agent: analyzing first ${cap} of ${failures.length} failures.`);
+        } else {
+            console.log(`🤖 RCA agent analyzing ${toAnalyze.length} failure(s)...`);
+        }
+
+        for (const t of toAnalyze) {
+            try {
+                const verdict = await analyzeFailure({
+                    title: t.fullTitle,
+                    file: t.location,
+                    error: t.error ?? 'Unknown error',
+                    stack: t.errorStack,
+                });
+                this.aiVerdicts.push({ test: t.fullTitle, file: t.location, verdict });
+            } catch (e) {
+                console.warn(`RCA failed for ${t.title}: ${(e as Error).message}`);
+            }
         }
     }
 
-    onStepBegin(test: TestCase, result: TestResult, step: TestStep): void {
-        if (!this.openSteps.has(result)) this.openSteps.set(result, []);
-        this.openSteps.get(result)!.push(step);
-        this.stepLogs.set(step, []);
-    }
+    // Snapshot this run's per-test statuses and load the previous snapshot.
+    private snapshotAndLoadPrev(): { prev?: BuildSummary; curr: BuildSummary } {
+        const dir = 'reports/runs';
+        fs.mkdirSync(dir, { recursive: true });
 
-    onStepEnd(test: TestCase, result: TestResult): void {
-        this.openSteps.get(result)?.pop();
-    }
-
-    onStdOut(chunk: string | Buffer, test: void | TestCase, result: void | TestResult): void {
-        this.captureOutput(chunk, result);
-    }
-
-    onStdErr(chunk: string | Buffer, test: void | TestCase, result: void | TestResult): void {
-        this.captureOutput(chunk, result);
-    }
-
-    private captureOutput(chunk: string | Buffer, result: void | TestResult): void {
-        if (!result) return;
-        const lines = chunk
-            .toString()
-            .split('\n')
-            .map((line) => stripAnsi(line).replace(/\r$/, ''))
-            .filter((line) => line.length > 0);
-        if (!lines.length) return;
-
-        if (!this.resultLogs.has(result)) this.resultLogs.set(result, []);
-        this.resultLogs.get(result)!.push(...lines);
-
-        const stack = this.openSteps.get(result);
-        const currentStep = stack?.[stack.length - 1];
-        if (currentStep) {
-            if (!this.stepLogs.has(currentStep)) this.stepLogs.set(currentStep, []);
-            this.stepLogs.get(currentStep)!.push(...lines);
+        const curr: BuildSummary = { runId: this.runId, tests: {} };
+        for (const t of this.testResults) {
+            curr.tests[t.fullTitle] = t.status;
         }
-    }
 
-    async onEnd(result: FullResult): Promise<void> {
-        const durationMs = Date.now() - this.startTime;
-        const records = this.buildRecords();
-        const summary = this.buildSummary(records, durationMs);
-
-        this.printSummary(summary, result.status);
-
-        fs.mkdirSync(this.outputDir, { recursive: true });
+        // Most recent existing snapshot = the previous build (before writing current).
+        let prev: BuildSummary | undefined;
+        const existing = fs
+            .readdirSync(dir)
+            .filter((f) => f.endsWith('.json'))
+            .sort();
+        if (existing.length > 0) {
+            try {
+                prev = JSON.parse(
+                    fs.readFileSync(path.join(dir, existing[existing.length - 1]), 'utf-8'),
+                ) as BuildSummary;
+            } catch {
+                console.warn('Flaky analyzer: failed to read previous snapshot.');
+            }
+        }
 
         fs.writeFileSync(
-            path.join(this.outputDir, 'results.json'),
-            JSON.stringify({ summary, tests: records }, null, 2),
-            'utf-8'
+            path.join(dir, `run-${this.runId}.json`),
+            JSON.stringify(curr, null, 2),
         );
-
-        fs.writeFileSync(path.join(this.outputDir, this.outputFile), this.buildHtml(summary, records), 'utf-8');
-
-        console.log(paint('  Report: ' + path.join(this.outputDir, this.outputFile), ANSI.cyan));
-        console.log('');
+        return { prev, curr };
     }
 
-    private buildRecords(): TestRecord[] {
-        return this.suite.allTests().map((test, index) => {
-            const lastResult = test.results[test.results.length - 1];
-            const outcome = test.outcome() as Outcome;
+    // Flaky Test Analyzer: diff this build vs the previous build (+ LLM summary).
+    private async runFlakyAnalysis(): Promise<void> {
+        const { prev, curr } = this.snapshotAndLoadPrev();
+        if (!prev) {
+            console.log('🔁 Flaky analyzer: only one build recorded — run again to compare.');
+            return;
+        }
+        this.flakyResult = await analyzeFlaky(prev, curr, hasApiKey());
+        this.prevBuildId = prev.runId;
+        this.currBuildId = curr.runId;
+        console.log(
+            `🔁 Flaky analyzer: ${this.flakyResult.counts.flaky} flaky, ${this.flakyResult.counts.failing} failing (vs build ${prev.runId}).`,
+        );
+    }
 
-            const parent = test.parent;
-            const suiteName = parent.type === 'describe' ? parent.title : path.basename(test.location.file).replace(/\.spec\.ts$|\.ts$/, '');
-
-            const authorAnnotation = test.annotations.find((a) => a.type === 'author');
-            const author = authorAnnotation?.description ?? process.env.TEST_AUTHOR ?? 'Unassigned';
-
-            const priorityTag = test.tags.find((t) => /^@?p[0-3]$/i.test(t));
-            const priority = priorityTag ? priorityTag.replace('@', '').toUpperCase() : 'P2';
-            const tags = test.tags.filter((t) => t !== priorityTag);
-
-            const file = path.relative(process.cwd(), test.location.file) + ':' + test.location.line;
-            const start = lastResult ? formatClockTime(lastResult.startTime) : '—';
-            const end = lastResult
-                ? formatClockTime(new Date(lastResult.startTime.getTime() + lastResult.duration))
-                : '—';
-            const durationMs = test.results.reduce((sum, r) => sum + r.duration, 0);
-
-            // For a flaky test, `lastResult` is the retry that finally passed — it has no error,
-            // no interesting steps, and (since screenshots are only-on-failure) often no screenshot.
-            // Source debug info from the attempt that actually failed instead.
-            const failingResult = test.results.find((r) => r.status === 'failed' || r.status === 'timedOut' || r.status === 'interrupted');
-            const sourceResult = outcome === 'unexpected' || outcome === 'flaky' ? (failingResult ?? lastResult) : lastResult;
-
-            const rawError = sourceResult?.errors[0]?.message;
-            const error = rawError ? stripAnsi(rawError) : undefined;
-
-            const steps = sourceResult
-                ? collectSteps(sourceResult.steps, sourceResult.startTime, (step) => this.stepLogs.get(step) ?? [])
-                : undefined;
-            const logs = sourceResult ? this.resultLogs.get(sourceResult) ?? [] : [];
-
-            const attachments = sourceResult?.attachments ?? [];
-            const screenshot = attachments.find((a) => a.contentType.startsWith('image/') && a.path);
-            const video = attachments.find((a) => a.contentType.startsWith('video/') && a.path);
-            const trace = attachments.find((a) => a.name === 'trace' && a.path);
-
-            return {
-                seq: index + 1,
-                suite: suiteName,
-                title: test.title,
-                author,
-                priority,
-                tags,
-                file,
-                start,
-                end,
-                durationMs,
-                status: outcome,
-                error,
-                steps,
-                logs,
-                screenshotHref: screenshot?.path ? this.relativeAttachmentPath(screenshot.path) : undefined,
-                videoHref: video?.path ? this.relativeAttachmentPath(video.path) : undefined,
-                traceHref: trace?.path ? this.relativeAttachmentPath(trace.path) : undefined,
-            };
+    private formatTime(date: Date): string {
+        return date.toLocaleString('en-US', {
+            month: 'short',
+            day: '2-digit',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false,
         });
     }
 
-    private relativeAttachmentPath(absolutePath: string): string {
-        return path.relative(this.outputDir, absolutePath).split(path.sep).join('/');
+    private formatDuration(ms: number): string {
+        const seconds = Math.floor(ms / 1000);
+        const minutes = Math.floor(seconds / 60);
+        const remainingSeconds = seconds % 60;
+        if (minutes > 0) {
+            return `${minutes}m ${remainingSeconds}s`;
+        }
+        return `${remainingSeconds}s`;
     }
 
-    private buildSummary(records: TestRecord[], durationMs: number): Summary {
-        const total = records.length;
-        const passed = records.filter((r) => r.status === 'expected').length;
-        const failed = records.filter((r) => r.status === 'unexpected').length;
-        const flaky = records.filter((r) => r.status === 'flaky').length;
-        const skipped = records.filter((r) => r.status === 'skipped').length;
-        const passRate = total > 0 ? (((passed + flaky) / total) * 100).toFixed(1) : '0.0';
+    private formatVideoTime(ms: number): string {
+        const totalSeconds = Math.floor(ms / 1000);
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = totalSeconds % 60;
+        const milliseconds = Math.floor((ms % 1000) / 10);
+        return `${minutes}:${seconds.toString().padStart(2, '0')}.${milliseconds.toString().padStart(2, '0')}`;
+    }
 
-        return {
-            total,
-            passed,
-            failed,
-            flaky,
-            skipped,
-            passRate,
-            environment: (process.env.TTA_ENV || 'qa').toLowerCase(),
-            browser: this.config.projects[0]?.name ?? 'chromium',
-            platform: formatPlatform(),
-            workers: this.config.workers,
-            runId: this.runId,
-            startedAt: new Date(this.startTime).toLocaleString(),
-            durationMs,
+    private collectTestLogs(result: TestResult): string[] {
+        const allLogs: string[] = [];
+
+        const appendChunks = (chunks: (string | Buffer)[], prefix = ''): void => {
+            for (const chunk of chunks) {
+                const text = typeof chunk === 'string' ? chunk : chunk.toString();
+                allLogs.push(...text
+                    .split('\n')
+                    .map(line => this.stripAnsi(line).trim())
+                    .filter(Boolean)
+                    .map(line => `${prefix}${line}`));
+            }
         };
+
+        appendChunks(result.stdout || []);
+        appendChunks(result.stderr || [], '[stderr] ');
+
+        return allLogs;
     }
 
-    private printSummary(summary: Summary, overallStatus: FullResult['status']): void {
-        console.log('');
-        console.log(paint('─'.repeat(56), ANSI.cyan));
-        console.log(paint(' Summary', ANSI.bold + ANSI.cyan));
-        console.log(paint('─'.repeat(56), ANSI.cyan));
-        console.log('  ' + paint('✓ Passed', ANSI.green) + '  : ' + summary.passed);
-        console.log('  ' + paint('✗ Failed', ANSI.red) + '  : ' + summary.failed);
-        console.log('  ' + paint('⟳ Flaky', ANSI.yellow) + '   : ' + summary.flaky);
-        console.log('  ' + paint('○ Skipped', ANSI.gray) + ' : ' + summary.skipped);
-        console.log('  Pass rate : ' + summary.passRate + '%');
-        console.log('  Duration  : ' + formatDuration(summary.durationMs));
-        console.log('  Result    : ' + (overallStatus === 'passed' ? paint(overallStatus, ANSI.green) : paint(overallStatus, ANSI.red)));
-        console.log(paint('─'.repeat(56), ANSI.cyan));
+    private stripAnsi(value: string): string {
+        const escapeCharacter = String.fromCharCode(27);
+        return value.replace(new RegExp(`${escapeCharacter}\\[[0-?]*[ -/]*[@-~]`, 'g'), '');
     }
 
-    private buildHtml(summary: Summary, records: TestRecord[]): string {
-        const dataJson = JSON.stringify({ summary, records });
+    private associateLogsWithSteps(_test: TestCase, result: TestResult, testSteps: StepData[], allLogs: string[]): void {
+        if (testSteps.length === 0) {
+            return;
+        }
 
-        return (
-            '<!doctype html>\n' +
-            '<html lang="en">\n' +
-            '<head>\n' +
-            '<meta charset="utf-8" />\n' +
-            '<title>Automation Report</title>\n' +
-            '<meta name="viewport" content="width=device-width, initial-scale=1" />\n' +
-            '<style>' +
-            this.css() +
-            '</style>\n' +
-            '</head>\n' +
-            '<body>\n' +
-            '<div class="banner">\n' +
-            '  <h1><span aria-hidden="true">🎭</span><span>Automation Report</span><span aria-hidden="true" class="ghost">🎭</span></h1>\n' +
-            '  <div class="sub">Advanced Playwright Framework</div>\n' +
-            '</div>\n' +
-            '<div class="shell">\n' +
-            '  <div class="cards" id="cards"></div>\n' +
-            '  <div class="metabar" id="metabar"></div>\n' +
-            '  <div class="filterbar">\n' +
-            '    <div class="filtergroup" id="priority-filters"><span class="glabel">Priority</span></div>\n' +
-            '    <div class="sep"></div>\n' +
-            '    <div class="filtergroup" id="status-filters"><span class="glabel">Status</span></div>\n' +
-            '    <div class="sep"></div>\n' +
-            '    <div class="filtergroup" id="tag-filters"><span class="glabel">Tags</span></div>\n' +
-            '  </div>\n' +
-            '  <div class="table-wrap">\n' +
-            '    <table>\n' +
-            '      <thead>\n' +
-            '        <tr>\n' +
-            '          <th style="width:36px">#</th>\n' +
-            '          <th>Suite</th>\n' +
-            '          <th style="min-width:220px">Test</th>\n' +
-            '          <th>Author</th>\n' +
-            '          <th>Priority</th>\n' +
-            '          <th>Tags</th>\n' +
-            '          <th>File</th>\n' +
-            '          <th class="num">Start</th>\n' +
-            '          <th class="num">End</th>\n' +
-            '          <th class="num">Duration</th>\n' +
-            '          <th>Status</th>\n' +
-            '          <th>Screenshot</th>\n' +
-            '          <th>Video</th>\n' +
-            '          <th>Trace</th>\n' +
-            '        </tr>\n' +
-            '      </thead>\n' +
-            '      <tbody id="rows"></tbody>\n' +
-            '    </table>\n' +
-            '  </div>\n' +
-            '</div>\n' +
-            '<script>\n' +
-            'var DATA = ' +
-            dataJson +
-            ';\n' +
-            this.clientScript() +
-            '\n</script>\n' +
-            '</body>\n' +
-            '</html>\n'
-        );
+        // Initialize consoleLogs array for all steps
+        for (const step of testSteps) {
+            if (!step.consoleLogs) {
+                step.consoleLogs = [];
+            }
+        }
+
+        // Process attachments that might contain step logs
+        for (const attachment of result.attachments) {
+            const logMatch = attachment.name.match(/^step-(\d+)-logs$/);
+            if (logMatch && attachment.contentType === 'text/plain') {
+                const stepIndex = parseInt(logMatch[1], 10);
+                if (stepIndex >= 0 && stepIndex < testSteps.length) {
+                    let logContent = '';
+                    if (attachment.body) {
+                        logContent = Buffer.isBuffer(attachment.body)
+                            ? attachment.body.toString()
+                            : String(attachment.body);
+                    } else if (attachment.path) {
+                        try {
+                            logContent = fs.readFileSync(attachment.path, 'utf-8');
+                        } catch {
+                            // Ignore read errors
+                        }
+                    }
+
+                    if (logContent) {
+                        const logs = logContent.split('\n').filter(line => line.trim());
+                        if (logs.length > 0) {
+                            testSteps[stepIndex].consoleLogs = logs;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (allLogs.length === 0) {
+            return;
+        }
+
+        // IMPORTANT: stdout from test code does NOT include our reporter's ⏳/✅ markers
+        // Those go directly to terminal, not into test stdout.
+        // So we need to distribute logs among steps based on step count.
+
+        // Strategy: If we have N steps and M logs, try to match logs to steps by:
+        // 1. Looking for patterns in the logs that might indicate step boundaries
+        // 2. Or distribute evenly if logs appear sequential
+
+        // Build step title patterns for potential matching
+        const stepTitlePatterns: RegExp[] = testSteps.map(step => {
+            // Create a pattern from the step title (escape special chars)
+            const escaped = step.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            return new RegExp(escaped, 'i');
+        });
+
+        // Track which logs have been assigned
+        const assignedLogs: boolean[] = new Array(allLogs.length).fill(false);
+
+        // First pass: Try to match logs to steps by step title content
+        for (let logIndex = 0; logIndex < allLogs.length; logIndex++) {
+            const log = allLogs[logIndex];
+
+            // Check if this log mentions any step title
+            for (let stepIndex = 0; stepIndex < testSteps.length; stepIndex++) {
+                if (stepTitlePatterns[stepIndex].test(log)) {
+                    testSteps[stepIndex].consoleLogs!.push(log);
+                    assignedLogs[logIndex] = true;
+                    break;
+                }
+            }
+        }
+
+        // Second pass: Distribute remaining logs sequentially
+        // Assume logs appear in the same order as steps execute
+        const unassignedLogs = allLogs.filter((_, idx) => !assignedLogs[idx]);
+
+        if (unassignedLogs.length > 0 && testSteps.length > 0) {
+            // If we have steps with no logs yet, distribute unassigned logs
+            const stepsNeedingLogs = testSteps.filter(s => s.consoleLogs!.length === 0);
+
+            if (stepsNeedingLogs.length > 0) {
+                // Distribute logs evenly among steps that need them
+                const logsPerStep = Math.ceil(unassignedLogs.length / testSteps.length);
+                let logIdx = 0;
+
+                for (let stepIdx = 0; stepIdx < testSteps.length && logIdx < unassignedLogs.length; stepIdx++) {
+                    const step = testSteps[stepIdx];
+                    // Add logs to this step (either until we hit logsPerStep or run out of logs)
+                    const logsForThisStep = Math.min(logsPerStep, unassignedLogs.length - logIdx);
+
+                    // Only add if step doesn't already have logs
+                    if (step.consoleLogs!.length === 0) {
+                        for (let i = 0; i < logsForThisStep; i++) {
+                            step.consoleLogs!.push(unassignedLogs[logIdx++]);
+                        }
+                    }
+                }
+            } else {
+                // All steps have some logs, add remaining to first step
+                testSteps[0].consoleLogs!.push(...unassignedLogs);
+            }
+        }
     }
 
-    private css(): string {
-        return [
-            ':root {',
-            '  --bg: #f4f5f9; --surface: #ffffff; --surface-2: #eef1f6; --border: #dfe3ec;',
-            '  --text: #161a24; --muted: #5c6577; --accent: #0e6f5c; --accent-2: #1a4d8f; --accent-soft: #e6f3ef;',
-            '  --pass: #158a5f; --pass-soft: #e5f5ec; --fail: #c8383d; --fail-soft: #fbeaea;',
-            '  --flaky: #a5730c; --flaky-soft: #faf1de; --skip: #6b7280; --skip-soft: #eef0f3;',
-            '  --mono: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;',
-            '  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;',
-            '}',
-            '* { box-sizing: border-box; }',
-            'body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans); padding: 0 0 64px; }',
-            '.banner { background: linear-gradient(120deg, var(--accent-2), var(--accent)); padding: 34px 20px 40px; text-align: center; margin-bottom: -26px; }',
-            '.banner h1 { display: flex; align-items: baseline; justify-content: center; gap: 10px; color: #fff; font-size: clamp(22px, 3vw, 28px); margin: 0; letter-spacing: -0.01em; text-shadow: 0 1px 12px rgba(0,0,0,0.15); }',
-            '.banner h1 .ghost { visibility: hidden; }',
-            '.banner .sub { color: rgba(255,255,255,0.85); font-family: var(--mono); font-size: 12.5px; margin-top: 8px; }',
-            '.shell { max-width: 1160px; margin: 0 auto; padding: 0 20px; }',
-            '.cards { position: relative; display: grid; grid-template-columns: repeat(7, 1fr); gap: 10px; margin-bottom: 16px; }',
-            '.card { background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--border); border-radius: 10px; padding: 14px 16px; box-shadow: 0 6px 20px -14px rgba(15,23,42,0.35); }',
-            '.card .num { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 24px; font-weight: 600; line-height: 1.1; }',
-            '.card .label { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-top: 5px; }',
-            '.card.total { border-left-color: var(--accent-2); } .card.total .num { color: var(--accent-2); }',
-            '.card.pass { border-left-color: var(--pass); } .card.pass .num { color: var(--pass); }',
-            '.card.fail { border-left-color: var(--fail); } .card.fail .num { color: var(--fail); }',
-            '.card.flaky { border-left-color: var(--flaky); } .card.flaky .num { color: var(--flaky); }',
-            '.card.skip { border-left-color: var(--skip); } .card.skip .num { color: var(--skip); }',
-            '.card.rate { border-left-color: var(--accent); } .card.rate .num { color: var(--accent); }',
-            '.card.duration { border-left-color: var(--accent-2); } .card.duration .num { color: var(--accent-2); }',
-            '.metabar, .filterbar { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; margin-bottom: 10px; display: flex; align-items: center; gap: 22px; flex-wrap: wrap; font-size: 12.5px; }',
-            '.meta-item { display: flex; align-items: center; gap: 7px; }',
-            '.meta-item .k { color: var(--muted); text-transform: uppercase; font-size: 10.5px; letter-spacing: 0.05em; }',
-            '.meta-item .v { font-family: var(--mono); font-weight: 600; }',
-            '.pill { display: inline-flex; align-items: center; gap: 5px; background: var(--accent-soft); color: var(--accent); border-radius: 999px; padding: 3px 10px; font-family: var(--mono); font-weight: 600; font-size: 12px; }',
-            '.filtergroup { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }',
-            '.filtergroup .glabel { color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; margin-right: 2px; }',
-            '.chk { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 7px; padding: 5px 10px; cursor: pointer; user-select: none; font-size: 12.5px; color: var(--muted); background: var(--surface-2); }',
-            '.chk input { accent-color: var(--accent); }',
-            '.chk.checked { color: var(--text); border-color: var(--accent); background: var(--accent-soft); }',
-            '.chk .n { font-family: var(--mono); opacity: 0.7; }',
-            '.chk.zero { opacity: 0.45; cursor: not-allowed; }',
-            '.sep { width: 1px; align-self: stretch; background: var(--border); }',
-            '.table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }',
-            'table { width: 100%; border-collapse: collapse; min-width: 1260px; }',
-            'thead th { position: sticky; top: 0; text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); font-weight: 700; padding: 10px 12px; background: var(--surface-2); border-bottom: 1px solid var(--border); white-space: nowrap; }',
-            'tbody tr.row { border-bottom: 1px solid var(--border); cursor: pointer; }',
-            'tbody tr.row:hover { background: var(--surface-2); }',
-            'tbody tr.row[hidden], tbody tr.detail[hidden] { display: none; }',
-            'td { padding: 10px 12px; vertical-align: top; font-size: 12.5px; }',
-            'td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }',
-            '.test-name { font-weight: 600; }',
-            '.file { font-family: var(--mono); font-size: 11px; color: var(--muted); }',
-            '.badge { display: inline-flex; align-items: center; gap: 4px; font-family: var(--mono); font-size: 10.5px; font-weight: 700; padding: 3px 9px; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.03em; white-space: nowrap; }',
-            '.badge.expected { background: var(--pass-soft); color: var(--pass); }',
-            '.badge.unexpected { background: var(--fail-soft); color: var(--fail); }',
-            '.badge.flaky { background: var(--flaky-soft); color: var(--flaky); }',
-            '.badge.skipped { background: var(--skip-soft); color: var(--skip); }',
-            '.prio { font-family: var(--mono); font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 5px; }',
-            '.prio.P0 { background: var(--fail-soft); color: var(--fail); }',
-            '.prio.P1 { background: var(--flaky-soft); color: var(--flaky); }',
-            '.prio.P2, .prio.P3 { background: var(--surface-2); color: var(--muted); }',
-            '.tag { display: inline-block; font-family: var(--mono); font-size: 10.5px; color: var(--accent-2); background: var(--surface-2); border-radius: 5px; padding: 2px 6px; margin: 1px 3px 1px 0; }',
-            '.action { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); border-radius: 6px; padding: 4px 8px; font-size: 11px; font-family: var(--mono); cursor: pointer; white-space: nowrap; text-decoration: none; }',
-            '.action.view { color: var(--pass); } .action.play { color: var(--flaky); } .action.trace { color: var(--accent-2); }',
-            '.na { color: var(--muted); font-family: var(--mono); font-size: 11px; }',
-            '.chevron { display: inline-block; transition: transform 0.15s ease; color: var(--muted); margin-right: 4px; }',
-            'tr.row.open .chevron { transform: rotate(90deg); }',
-            'tr.detail td { background: #fcfcfd; padding: 0; }',
-            '.detail-inner { padding: 14px 18px 18px 42px; display: flex; flex-direction: column; gap: 16px; }',
-            '.detail-label, .detail-section-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; margin-bottom: 8px; }',
-            '.detail-label { color: var(--fail); }',
-            '.detail-section-label.toggle { cursor: pointer; user-select: none; display: flex; align-items: center; gap: 6px; }',
-            '.detail-section-label.toggle .sec-arrow { display: inline-block; font-size: 9px; transition: transform 0.15s ease; }',
-            '.detail-section-label.toggle.collapsed .sec-arrow { transform: rotate(-90deg); }',
-            '.error { font-family: var(--mono); font-size: 11.5px; line-height: 1.6; color: var(--fail); background: var(--fail-soft); border: 1px solid #f3caca; border-radius: 8px; padding: 10px 12px; white-space: pre-wrap; overflow-x: auto; }',
-            '.log-block { font-family: var(--mono); font-size: 11px; line-height: 1.6; color: #d7dce6; background: #12151f; border-radius: 8px; padding: 10px 12px; white-space: pre-wrap; overflow: auto; max-height: 260px; }',
-            '.steps { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }',
-            '.step-group { border-bottom: 1px solid var(--border); }',
-            '.step-group:last-child { border-bottom: none; }',
-            '.step { display: flex; align-items: center; gap: 10px; padding: 6px 12px; font-size: 11.5px; font-family: var(--mono); cursor: pointer; }',
-            '.step.fail { background: var(--fail-soft); }',
-            '.step .step-arrow { font-size: 9px; color: var(--muted); transition: transform 0.15s ease; }',
-            '.step.open .step-arrow { transform: rotate(90deg); }',
-            '.step-icon { width: 14px; text-align: center; }',
-            '.step.ok .step-icon { color: var(--pass); }',
-            '.step.fail .step-icon { color: var(--fail); }',
-            '.step-title { flex: 1; }',
-            '.step.fail .step-title { color: var(--fail); font-weight: 600; }',
-            '.step-dur { color: var(--muted); font-size: 11px; }',
-            '.step-sub-error { margin: 0 12px 8px 34px; font-family: var(--mono); font-size: 11px; color: var(--fail); border-left: 2px solid var(--fail); padding: 4px 10px; }',
-            '.step-detail { padding: 10px 14px 12px 34px; background: var(--surface-2); border-top: 1px solid var(--border); }',
-            '.step-meta { display: flex; gap: 16px; flex-wrap: wrap; font-size: 11px; color: var(--muted); font-family: var(--mono); margin-bottom: 8px; }',
-            '.step-console-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); font-weight: 700; margin-bottom: 4px; }',
-            '.media-row { display: flex; gap: 14px; flex-wrap: wrap; }',
-            '.media-card { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--surface); width: 220px; }',
-            '.media-card .thumb-img { width: 100%; height: 130px; object-fit: cover; display: block; background: var(--surface-2); }',
-            '.media-card .thumb-video { width: 100%; height: 130px; display: block; background: #000; }',
-            '.media-card .trace-thumb { height: 130px; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; background: var(--surface-2); }',
-            '.media-card .cap { padding: 6px 10px; font-size: 11px; display: flex; justify-content: space-between; align-items: center; color: var(--muted); }',
-            '.media-card .cap a { color: var(--accent-2); text-decoration: none; font-weight: 600; }',
-            '@media (prefers-reduced-motion: reduce) { .chevron { transition: none; } }',
-            '@media (max-width: 1000px) { .cards { grid-template-columns: repeat(4, 1fr); } }',
-            '@media (max-width: 640px) { .cards { grid-template-columns: repeat(3, 1fr); } }',
-            '@media (max-width: 420px) { .cards { grid-template-columns: repeat(2, 1fr); } }',
-        ].join('\n');
+    private async generateReport(): Promise<void> {
+        const reportDir = path.dirname(this.outputFile);
+        if (!fs.existsSync(reportDir)) {
+            fs.mkdirSync(reportDir, { recursive: true });
+        }
+
+        const html = this.generateHTML();
+        fs.writeFileSync(this.outputFile, html);
+
+        const indexPath = path.join(reportDir, 'index.html');
+        const latestRedirect = `<!DOCTYPE html>
+<html><head><meta http-equiv="refresh" content="0;url=${path.basename(this.outputFile)}">
+<title>TTA Report - Latest</title></head>
+<body><p>Redirecting to <a href="${path.basename(this.outputFile)}">latest report</a>...</p></body></html>`;
+        fs.writeFileSync(indexPath, latestRedirect);
+
+        this.generateHistoryPage(reportDir);
     }
 
-    private clientScript(): string {
-        return [
-            "function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;'); }",
-            "function fmtDuration(ms) { if (ms === 0) return '—'; if (ms < 1000) return Math.round(ms) + 'ms'; return (ms / 1000).toFixed(2) + 's'; }",
-            '',
-            'var summary = DATA.summary;',
-            'var records = DATA.records;',
-            "var badgeLabel = { expected: 'passed', unexpected: 'failed', flaky: 'flaky', skipped: 'skipped' };",
-            '',
-            "document.getElementById('cards').innerHTML =",
-            "  '<div class=\"card total\"><div class=\"num\">' + summary.total + '</div><div class=\"label\">Total tests</div></div>' +",
-            "  '<div class=\"card pass\"><div class=\"num\">' + summary.passed + '</div><div class=\"label\">Passed</div></div>' +",
-            "  '<div class=\"card fail\"><div class=\"num\">' + summary.failed + '</div><div class=\"label\">Failed</div></div>' +",
-            "  '<div class=\"card flaky\"><div class=\"num\">' + summary.flaky + '</div><div class=\"label\">Flaky</div></div>' +",
-            "  '<div class=\"card skip\"><div class=\"num\">' + summary.skipped + '</div><div class=\"label\">Skipped</div></div>' +",
-            "  '<div class=\"card rate\"><div class=\"num\">' + summary.passRate + '%</div><div class=\"label\">Pass rate</div></div>' +",
-            "  '<div class=\"card duration\"><div class=\"num\">' + fmtDuration(summary.durationMs) + '</div><div class=\"label\">Duration</div></div>';",
-            '',
-            "document.getElementById('metabar').innerHTML =",
-            "  '<div class=\"meta-item\"><span class=\"k\">Environment</span><span class=\"pill\">🌐 ' + esc(summary.environment) + '</span></div>' +",
-            "  '<div class=\"meta-item\"><span class=\"k\">Browser</span><span class=\"pill\">🌐 ' + esc(summary.browser) + '</span></div>' +",
-            "  '<div class=\"meta-item\"><span class=\"k\">Platform</span><span class=\"v\">' + esc(summary.platform) + '</span></div>' +",
-            "  '<div class=\"meta-item\"><span class=\"k\">Workers</span><span class=\"v\">' + summary.workers + '</span></div>' +",
-            "  '<div class=\"meta-item\"><span class=\"k\">Run ID</span><span class=\"v\">' + esc(summary.runId) + '</span></div>' +",
-            "  '<div class=\"meta-item\"><span class=\"k\">Started</span><span class=\"v\">' + esc(summary.startedAt) + '</span></div>' +",
-            "  '<div class=\"meta-item\"><span class=\"k\">Duration</span><span class=\"v\">' + fmtDuration(summary.durationMs) + '</span></div>';",
-            '',
-            "var priorities = ['All', 'P0', 'P1', 'P2', 'P3'];",
-            "var statuses = ['All', 'expected', 'unexpected', 'flaky', 'skipped'];",
-            "var statusLabels = { expected: 'Passed', unexpected: 'Failed', flaky: 'Flaky', skipped: 'Skipped' };",
-            "var allTags = Array.prototype.concat.apply([], records.map(function(r){ return r.tags; }))",
-            "  .filter(function(t, i, arr) { return arr.indexOf(t) === i; }).sort();",
-            "var activePriority = 'All';",
-            "var activeStatus = 'All';",
-            'var activeTags = [];',
-            '',
-            'function countPriority(p) { return p === "All" ? records.length : records.filter(function(r){ return r.priority === p; }).length; }',
-            'function countStatus(s) { return s === "All" ? records.length : records.filter(function(r){ return r.status === s; }).length; }',
-            'function countTag(t) { return records.filter(function(r){ return r.tags.indexOf(t) !== -1; }).length; }',
-            '',
-            'function renderFilters() {',
-            "  var pHtml = '<span class=\"glabel\">Priority</span>';",
-            '  priorities.forEach(function(p) {',
-            '    var n = countPriority(p);',
-            '    var zero = n === 0 && p !== "All";',
-            "    pHtml += '<label class=\"chk' + (activePriority === p ? ' checked' : '') + (zero ? ' zero' : '') + '\" data-group=\"priority\" data-value=\"' + p + '\">' +",
-            "      '<input type=\"checkbox\"' + (activePriority === p ? ' checked' : '') + (zero ? ' disabled' : '') + ' />' + p + ' <span class=\"n\">' + n + '</span></label>';",
-            '  });',
-            "  document.getElementById('priority-filters').innerHTML = pHtml;",
-            '',
-            "  var sHtml = '<span class=\"glabel\">Status</span>';",
-            '  statuses.forEach(function(s) {',
-            '    var n = countStatus(s);',
-            '    var zero = n === 0 && s !== "All";',
-            "    var label = s === 'All' ? 'All' : statusLabels[s];",
-            "    sHtml += '<label class=\"chk' + (activeStatus === s ? ' checked' : '') + (zero ? ' zero' : '') + '\" data-group=\"status\" data-value=\"' + s + '\">' +",
-            "      '<input type=\"checkbox\"' + (activeStatus === s ? ' checked' : '') + (zero ? ' disabled' : '') + ' />' + label + ' <span class=\"n\">' + n + '</span></label>';",
-            '  });',
-            "  document.getElementById('status-filters').innerHTML = sHtml;",
-            '',
-            "  var tHtml = '<span class=\"glabel\">Tags</span>';",
-            "  var allTagsChecked = activeTags.length === 0;",
-            "  tHtml += '<label class=\"chk' + (allTagsChecked ? ' checked' : '') + '\" data-group=\"tag\" data-value=\"All\">' +",
-            "    '<input type=\"checkbox\"' + (allTagsChecked ? ' checked' : '') + ' />All <span class=\"n\">' + records.length + '</span></label>';",
-            '  allTags.forEach(function(t) {',
-            '    var n = countTag(t);',
-            "    var checked = activeTags.indexOf(t) !== -1;",
-            "    tHtml += '<label class=\"chk' + (checked ? ' checked' : '') + '\" data-group=\"tag\" data-value=\"' + t + '\">' +",
-            "      '<input type=\"checkbox\"' + (checked ? ' checked' : '') + ' />' + esc(t) + ' <span class=\"n\">' + n + '</span></label>';",
-            '  });',
-            "  document.getElementById('tag-filters').innerHTML = allTags.length ? tHtml : '<span class=\"glabel\">Tags</span><span class=\"na\">no tags in this suite</span>';",
-            '',
-            "  Array.prototype.forEach.call(document.querySelectorAll('.chk'), function(el) {",
-            "    el.addEventListener('click', function(e) {",
-            '      e.preventDefault();',
-            '      if (el.classList.contains("zero")) return;',
-            '      var group = el.getAttribute("data-group");',
-            '      var value = el.getAttribute("data-value");',
-            '      if (group === "priority") activePriority = value;',
-            '      if (group === "status") activeStatus = value;',
-            '      if (group === "tag") {',
-            '        if (value === "All") {',
-            '          activeTags = [];',
-            '        } else {',
-            '          var idx = activeTags.indexOf(value);',
-            '          if (idx === -1) activeTags.push(value); else activeTags.splice(idx, 1);',
-            '        }',
-            '      }',
-            '      renderFilters();',
-            '      applyFilters();',
-            '    });',
-            '  });',
-            '}',
-            '',
-            'function applyFilters() {',
-            "  Array.prototype.forEach.call(document.querySelectorAll('#rows tr.row'), function(row) {",
-            '    var i = parseInt(row.getAttribute("data-i"), 10);',
-            '    var r = records[i];',
-            '    var tagMatch = activeTags.length === 0 || activeTags.some(function(t) { return r.tags.indexOf(t) !== -1; });',
-            '    var match = (activePriority === "All" || r.priority === activePriority) && (activeStatus === "All" || r.status === activeStatus) && tagMatch;',
-            '    row.hidden = !match;',
-            '    var detail = row.nextElementSibling;',
-            '    if (detail && detail.classList.contains("detail")) {',
-            '      detail.hidden = !match || !row.classList.contains("open");',
-            '    }',
-            '  });',
-            '}',
-            '',
-            'function buildLogBlock(lines) {',
-            '  return "<pre class=\\"log-block\\">" + esc(lines.join(String.fromCharCode(10))) + "</pre>";',
-            '}',
-            '',
-            'function buildTestLogsHtml(r) {',
-            '  if (!r.logs || !r.logs.length) return "";',
-            '  return "<div><div class=\\"detail-section-label toggle\\" data-toggle=\\"logs\\"><span class=\\"sec-arrow\\">▼</span>Test Logs (" + r.logs.length + " lines)</div><div class=\\"toggle-body\\">" + buildLogBlock(r.logs) + "</div></div>";',
-            '}',
-            '',
-            'function buildStepsHtml(r, ri) {',
-            '  if (!r.steps || !r.steps.length) return "";',
-            '  var groups = r.steps.map(function(s, si) {',
-            '    var cls = s.status === "fail" ? "step fail" : "step ok";',
-            '    var icon = s.status === "fail" ? "✗" : "✓";',
-            '    var head = "<div class=\\"" + cls + "\\" data-ri=\\"" + ri + "\\" data-si=\\"" + si + "\\">" +',
-            '      "<span class=\\"step-arrow\\">▶</span><span class=\\"step-icon\\">" + icon + "</span>" +',
-            '      "<span class=\\"step-title\\">" + esc(s.title) + "</span><span class=\\"step-dur\\">" + fmtDuration(s.durationMs) + "</span></div>";',
-            '    var subError = (s.status === "fail" && s.error) ?',
-            '      "<div class=\\"step-sub-error\\">↳ " + esc(s.error.split(String.fromCharCode(10))[0]) + "</div>" : "";',
-            '    var meta = "<div class=\\"step-meta\\"><span>⏱ Started: " + esc(s.startedAt) + "</span><span>⧗ Duration: " + fmtDuration(s.durationMs) + "</span>" +',
-            '      (r.videoHref && s.videoRange ? "<span>🎬 Video: " + esc(s.videoRange) + "</span>" : "") + "</div>";',
-            '    var consoleBlock = (s.logs && s.logs.length)',
-            '      ? "<div class=\\"step-console-label\\">Console Output (" + s.logs.length + " lines)</div>" + buildLogBlock(s.logs)',
-            '      : "";',
-            '    var body = "<div class=\\"step-detail\\" hidden>" + meta + consoleBlock + "</div>";',
-            '    return "<div class=\\"step-group\\">" + head + subError + body + "</div>";',
-            '  }).join("");',
-            '  return "<div><div class=\\"detail-section-label toggle\\" data-toggle=\\"steps\\"><span class=\\"sec-arrow\\">▼</span>Test Steps</div><div class=\\"toggle-body\\"><div class=\\"steps\\">" + groups + "</div></div></div>";',
-            '}',
-            '',
-            'function buildMediaHtml(r) {',
-            '  var cards = "";',
-            '  if (r.screenshotHref) {',
-            '    cards += "<div class=\\"media-card\\"><a href=\\"" + esc(r.screenshotHref) + "\\" target=\\"_blank\\" rel=\\"noopener\\"><img class=\\"thumb-img\\" src=\\"" + esc(r.screenshotHref) + "\\" alt=\\"screenshot\\" /></a><div class=\\"cap\\"><span>screenshot</span><a href=\\"" + esc(r.screenshotHref) + "\\" target=\\"_blank\\" rel=\\"noopener\\">View full ↗</a></div></div>";',
-            '  }',
-            '  if (r.videoHref) {',
-            '    cards += "<div class=\\"media-card\\"><video class=\\"thumb-video\\" src=\\"" + esc(r.videoHref) + "\\" controls muted preload=\\"metadata\\"></video><div class=\\"cap\\"><span>video</span><a href=\\"" + esc(r.videoHref) + "\\" target=\\"_blank\\" rel=\\"noopener\\">Open ↗</a></div></div>";',
-            '  }',
-            '  if (r.traceHref) {',
-            '    cards += "<div class=\\"media-card\\"><div class=\\"trace-thumb\\">⏺ trace.zip</div><div class=\\"cap\\"><span>trace</span><a href=\\"" + esc(r.traceHref) + "\\" target=\\"_blank\\" rel=\\"noopener\\">Open ↗</a></div></div>";',
-            '  }',
-            '  if (!cards) return "";',
-            '  return "<div><div class=\\"detail-section-label media\\">🖼 Screenshot &amp; Video</div><div class=\\"media-row\\">" + cards + "</div></div>";',
-            '}',
-            '',
-            "var rowsHtml = records.map(function(r, i) {",
-            "  var hasError = !!r.error;",
-            "  var expandable = hasError || (r.steps && r.steps.length > 0) || (r.logs && r.logs.length > 0) || !!r.screenshotHref || !!r.videoHref || !!r.traceHref;",
-            "  var chevron = expandable ? '<span class=\"chevron\">▶</span>' : '<span class=\"chevron\" style=\"visibility:hidden\">▶</span>';",
-            "  var tagsHtml = r.tags.length ? r.tags.map(function(t){ return '<span class=\"tag\">' + esc(t) + '</span>'; }).join('') : '<span class=\"na\">—</span>';",
-            "  var screenshotHtml = r.screenshotHref ? '<a class=\"action view\" href=\"' + esc(r.screenshotHref) + '\" target=\"_blank\" rel=\"noopener\">👁 View</a>' : '<span class=\"na\">n/a</span>';",
-            "  var videoHtml = r.videoHref ? '<a class=\"action play\" href=\"' + esc(r.videoHref) + '\" target=\"_blank\" rel=\"noopener\">▶ Play</a>' : '<span class=\"na\">n/a</span>';",
-            "  var traceHtml = r.traceHref ? '<a class=\"action trace\" href=\"' + esc(r.traceHref) + '\" target=\"_blank\" rel=\"noopener\">⏺ Open</a>' : '<span class=\"na\">n/a</span>';",
-            "  var row = '<tr class=\"row\" data-i=\"' + i + '\">' +",
-            "    '<td class=\"num\">' + r.seq + '</td>' +",
-            "    '<td>' + esc(r.suite) + '</td>' +",
-            "    '<td class=\"test-name\">' + chevron + esc(r.title) + '</td>' +",
-            "    '<td>' + esc(r.author) + '</td>' +",
-            "    '<td><span class=\"prio ' + r.priority + '\">' + r.priority + '</span></td>' +",
-            "    '<td>' + tagsHtml + '</td>' +",
-            "    '<td class=\"file\">' + esc(r.file) + '</td>' +",
-            "    '<td class=\"num\">' + esc(r.start) + '</td>' +",
-            "    '<td class=\"num\">' + esc(r.end) + '</td>' +",
-            "    '<td class=\"num\">' + fmtDuration(r.durationMs) + '</td>' +",
-            "    '<td><span class=\"badge ' + r.status + '\">' + badgeLabel[r.status] + '</span></td>' +",
-            "    '<td>' + screenshotHtml + '</td>' +",
-            "    '<td>' + videoHtml + '</td>' +",
-            "    '<td>' + traceHtml + '</td>' +",
-            "  '</tr>';",
-            "  var detail = '<tr class=\"detail\" hidden><td colspan=\"14\">' +",
-            "    (expandable ? ('<div class=\"detail-inner\">' + (hasError ? '<div><div class=\"detail-label\">Error</div><div class=\"error\">' + esc(r.error) + '</div></div>' : '') + buildTestLogsHtml(r) + buildStepsHtml(r, i) + buildMediaHtml(r) + '</div>') : '') +",
-            "  '</td></tr>';",
-            '  return row + detail;',
-            "}).join('');",
-            "document.getElementById('rows').innerHTML = rowsHtml;",
-            '',
-            "Array.prototype.forEach.call(document.querySelectorAll('#rows tr.row'), function(row) {",
-            "  row.addEventListener('click', function() {",
-            '    var detail = row.nextElementSibling;',
-            '    if (!detail || !detail.querySelector(".detail-inner")) return;',
-            '    var opening = !row.classList.contains("open");',
-            '    row.classList.toggle("open", opening);',
-            '    detail.hidden = !opening;',
-            '  });',
-            '});',
-            '',
-            "document.getElementById('rows').addEventListener('click', function(e) {",
-            '  var stepEl = e.target.closest ? e.target.closest(".step") : null;',
-            '  if (stepEl) {',
-            '    e.stopPropagation();',
-            '    var stepDetail = stepEl.nextElementSibling;',
-            '    if (stepDetail && stepDetail.classList.contains("step-sub-error")) stepDetail = stepDetail.nextElementSibling;',
-            '    if (!stepDetail || !stepDetail.classList.contains("step-detail")) return;',
-            '    var opening = stepDetail.hidden;',
-            '    stepDetail.hidden = !opening;',
-            '    stepEl.classList.toggle("open", opening);',
-            '    return;',
-            '  }',
-            '  var toggleEl = e.target.closest ? e.target.closest(".detail-section-label.toggle") : null;',
-            '  if (toggleEl) {',
-            '    e.stopPropagation();',
-            '    var body = toggleEl.nextElementSibling;',
-            '    if (!body) return;',
-            '    var collapsing = !toggleEl.classList.contains("collapsed");',
-            '    toggleEl.classList.toggle("collapsed", collapsing);',
-            '    body.hidden = collapsing;',
-            '  }',
-            '});',
-            '',
-            'renderFilters();',
-        ].join('\n');
+    private generateHistoryPage(reportDir: string): void {
+        const files = fs.readdirSync(reportDir)
+            .filter(f => f.startsWith('report_') && f.endsWith('.html'))
+            .sort()
+            .reverse();
+
+        const historyHtml = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>TTA Report History</title>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background: #f5f5f5; padding: 20px; }
+        .header { background: linear-gradient(135deg, #10b981 0%, #059669 100%); color: white; padding: 20px; text-align: center; margin-bottom: 20px; border-radius: 8px; }
+        .report-list { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .report-item { padding: 12px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }
+        .report-item:hover { background: #f0fdf4; }
+        .report-link { color: #059669; text-decoration: none; font-weight: 500; }
+        .report-link:hover { text-decoration: underline; }
+        .report-date { color: #666; font-size: 12px; }
+        .latest-badge { background: #10b981; color: white; padding: 2px 8px; border-radius: 10px; font-size: 11px; margin-left: 10px; }
+    </style>
+</head>
+<body>
+    <div class="header"><h1>📊 TTA Report History</h1><p>The Testing Academy - Playwright Framework</p></div>
+    <div class="report-list">
+        ${files.map((f, i) => {
+            const match = f.match(/report_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})\.html/);
+            const dateStr = match ? `${match[1]}-${match[2]}-${match[3]} ${match[4]}:${match[5]}:${match[6]}` : f;
+            const latestBadge = i === 0 ? '<span class="latest-badge">LATEST</span>' : '';
+            return `<div class="report-item">
+                <a href="${f}" class="report-link">${f}${latestBadge}</a>
+                <span class="report-date">${dateStr}</span>
+            </div>`;
+        }).join('\n')}
+    </div>
+</body>
+</html>`;
+        fs.writeFileSync(path.join(reportDir, 'history.html'), historyHtml);
+    }
+
+    private generateHTML(): string {
+        const browserName = this.config?.projects[0]?.name || this.reportMeta?.browser || 'chrome';
+        const platform = process.platform === 'darwin' ? 'Mac' : process.platform === 'win32' ? 'Windows' : 'Linux';
+
+        return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TTA Automation Report</title>
+    <style>
+        ${this.getStyles()}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🎭 TTA Automation Report</h1>
+        <p class="header-subtitle">The Testing Academy - Playwright Framework</p>
+    </div>
+
+    <div class="container">
+        ${this.generateMetaSection(browserName, platform)}
+        ${this.generateSuiteStatus()}
+        ${this.generateRunStatus()}
+        ${this.generateMainTabs()}
+        <div id="tab-results" class="main-tab-panel active">
+            ${this.generateFilters()}
+            ${this.generateTestTable()}
+        </div>
+        <div id="tab-aidata" class="main-tab-panel">
+            ${this.generateAiDataTab()}
+        </div>
+        <div id="tab-verdict" class="main-tab-panel">
+            ${this.generateAiVerdictTab()}
+        </div>
+        <div id="tab-flaky" class="main-tab-panel">
+            ${this.generateFlakyTab()}
+        </div>
+    </div>
+
+    <div id="screenshotModal" class="modal">
+        <span class="modal-close">&times;</span>
+        <img id="modalImage" class="modal-content" src="" alt="Screenshot">
+    </div>
+
+    <footer class="report-footer">
+        <p>Built with ❤️ by <a href="https://thetestingacademy.com" target="_blank">Pramod Dutta</a> | <a href="https://thetestingacademy.com" target="_blank">The Testing Academy</a></p>
+    </footer>
+
+    <script>
+        ${this.getScripts()}
+    </script>
+</body>
+</html>`;
+    }
+
+    private generateMetaSection(browserName: string, platform: string): string {
+        const env = process.env.TEST_ENV || 'UAT';
+        const totalDuration = this.endTime.getTime() - this.startTime.getTime();
+        const passRate = this.suiteStats.total > 0
+            ? ((this.suiteStats.passed / this.suiteStats.total) * 100).toFixed(1)
+            : '0';
+
+        return `
+        <!-- Stats Dashboard -->
+        <div class="stats-dashboard">
+            <div class="stat-card">
+                <div class="stat-value">${this.suiteStats.total}</div>
+                <div class="stat-label">Total Tests</div>
+            </div>
+            <div class="stat-card passed">
+                <div class="stat-value">${this.suiteStats.passed}</div>
+                <div class="stat-label">Passed</div>
+            </div>
+            <div class="stat-card failed">
+                <div class="stat-value">${this.suiteStats.failed}</div>
+                <div class="stat-label">Failed</div>
+            </div>
+            <div class="stat-card skipped">
+                <div class="stat-value">${this.suiteStats.skipped}</div>
+                <div class="stat-label">Skipped</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">${passRate}%</div>
+                <div class="stat-label">Pass Rate</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">${this.formatDuration(totalDuration)}</div>
+                <div class="stat-label">Duration</div>
+            </div>
+        </div>
+
+        <!-- Meta Info Bar -->
+        <div class="meta-section">
+            <div class="meta-item">
+                <span class="meta-label">Environment</span>
+                <span class="env-badge">🌐 ${env.toUpperCase()}</span>
+            </div>
+            <div class="meta-item">
+                <span class="meta-label">Browser</span>
+                <span class="browser-badge">🌍 ${browserName}</span>
+            </div>
+            <div class="meta-item">
+                <span class="meta-label">Platform</span>
+                <span class="meta-value">${platform}</span>
+            </div>
+            <div class="meta-item">
+                <span class="meta-label">Workers</span>
+                <span class="meta-value">${this.config?.workers ?? this.reportMeta?.workers ?? 1}</span>
+            </div>
+            <div class="meta-item">
+                <span class="meta-label">Run ID</span>
+                <span class="meta-value" style="font-family: 'JetBrains Mono', monospace; font-size: 12px;">${this.runId}</span>
+            </div>
+            <div class="meta-item">
+                <span class="meta-label">Started</span>
+                <span class="meta-value">${this.formatTime(this.startTime)}</span>
+            </div>
+        </div>`;
+    }
+
+    private generateSuiteStatus(): string {
+        // Combined into meta section - return empty
+        return '';
+    }
+
+    private generateRunStatus(): string {
+        // Combined into meta section - return empty
+        return '';
+    }
+
+    private generateFilters(): string {
+        return `
+        <div class="filters">
+            <div class="filter-group">
+                <strong>🏷️ Priority:</strong>
+                <label><input type="checkbox" class="group-filter" value="all" checked onchange="filterByGroup(this)"><span>All</span></label>
+                <label><input type="checkbox" class="group-filter" value="p0" onchange="filterByGroup(this)"><span>P0</span></label>
+                <label><input type="checkbox" class="group-filter" value="p1" onchange="filterByGroup(this)"><span>P1</span></label>
+                <label><input type="checkbox" class="group-filter" value="smoke" onchange="filterByGroup(this)"><span>Smoke</span></label>
+            </div>
+            <div class="filter-group">
+                <strong>📊 Status:</strong>
+                <label><input type="checkbox" class="status-filter" value="all" checked onchange="filterByStatus(this)"><span>All</span></label>
+                <label><input type="checkbox" class="status-filter" value="passed" onchange="filterByStatus(this)"><span>✅ Passed</span></label>
+                <label><input type="checkbox" class="status-filter" value="failed" onchange="filterByStatus(this)"><span>❌ Failed</span></label>
+                <label><input type="checkbox" class="status-filter" value="skipped" onchange="filterByStatus(this)"><span>⏭️ Skipped</span></label>
+            </div>
+        </div>`;
+    }
+
+    // Top-level tab bar: Test Results | AI Data | AI Verdict.
+    private generateMainTabs(): string {
+        const aiCount = this.aiData.length;
+        const rcaCount = this.aiVerdicts.length;
+        return `
+        <div class="main-tabs">
+            <button class="main-tab active" onclick="switchMainTab('results', this)">📋 Test Results</button>
+            <button class="main-tab" onclick="switchMainTab('aidata', this)">🤖 AI Data${aiCount ? ` (${aiCount})` : ''}</button>
+            <button class="main-tab" onclick="switchMainTab('verdict', this)">⚖️ AI Verdict${rcaCount ? ` (${rcaCount})` : ''}</button>
+            <button class="main-tab" onclick="switchMainTab('flaky', this)">🔁 Flaky${this.flakyResult ? ` (${this.flakyResult.counts.flaky})` : ''}</button>
+        </div>`;
+    }
+
+    // Flaky tab body: build-vs-build counts, highlighted flaky tests, LLM summary.
+    private generateFlakyTab(): string {
+        if (!this.flakyResult) {
+            return `<div class="ai-empty">🔁 Flaky analysis needs two builds. Run the suite again to compare.</div>`;
+        }
+        const r = this.flakyResult;
+        const flakyList = r.flaky.length
+            ? r.flaky.map((t) => `<div class="flaky-item">🔁 ${this.escapeHtml(t)}</div>`).join('')
+            : `<div class="ai-empty">No flaky tests — statuses were consistent across both builds.</div>`;
+        const summary = r.summary
+            ? `<div class="flaky-summary"><strong>🤖 AI summary:</strong> ${this.escapeHtml(r.summary)}</div>`
+            : '';
+        return `
+        <div class="flaky-wrap">
+            <div class="flaky-compare">Comparing build <code>${this.escapeHtml(this.prevBuildId ?? '')}</code> → <code>${this.escapeHtml(this.currBuildId ?? '')}</code></div>
+            <div class="flaky-counts">
+                <div class="flaky-count flaky"><div class="fc-num">${r.counts.flaky}</div><div class="fc-label">Flaky</div></div>
+                <div class="flaky-count fail"><div class="fc-num">${r.counts.failing}</div><div class="fc-label">Failing (latest)</div></div>
+                <div class="flaky-count"><div class="fc-num">${r.counts.total}</div><div class="fc-label">Total</div></div>
+            </div>
+            <div class="flaky-list">${flakyList}</div>
+            ${summary}
+        </div>`;
+    }
+
+    // AI Verdict tab body: one RCA card per failed test.
+    private generateAiVerdictTab(): string {
+        if (this.aiVerdicts.length === 0) {
+            return `<div class="ai-empty">⚖️ No AI verdicts — no failures analyzed in this run.</div>`;
+        }
+        return `<div class="ai-data-list">${this.aiVerdicts.map((v) => this.renderVerdictCard(v)).join('')}</div>`;
+    }
+
+    // Render a single RCA verdict: severity, priority, root cause, fix bullets.
+    private renderVerdictCard(v: { test: string; file: string; verdict: RcaVerdict }): string {
+        const sevClass = `sev-${v.verdict.severity.toLowerCase()}`;
+        const fixes = v.verdict.fixes.length
+            ? v.verdict.fixes.map((f) => `<li>${this.escapeHtml(f)}</li>`).join('')
+            : '<li>No fix suggestions returned.</li>';
+        return `
+        <div class="ai-card">
+            <div class="ai-card-title">⚖️ ${this.escapeHtml(v.test)} <span class="verdict-file">${this.escapeHtml(v.file)}</span></div>
+            <div class="verdict-body">
+                <div class="verdict-badges">
+                    <span class="verdict-badge ${sevClass}">Severity: ${this.escapeHtml(v.verdict.severity)}</span>
+                    <span class="verdict-badge prio">Priority: ${this.escapeHtml(v.verdict.priority)}</span>
+                </div>
+                <div class="verdict-root"><strong>Root cause:</strong> ${this.escapeHtml(v.verdict.rootCause)}</div>
+                <div class="verdict-fixes"><strong>How to fix:</strong><ul>${fixes}</ul></div>
+            </div>
+        </div>`;
+    }
+
+    // AI Data tab body: one card per captured AI-generated dataset.
+    private generateAiDataTab(): string {
+        if (this.aiData.length === 0) {
+            return `<div class="ai-empty">🤖 No AI-generated test data captured in this run.</div>`;
+        }
+        return `<div class="ai-data-list">${this.aiData.map((d) => this.renderAiCard(d)).join('')}</div>`;
+    }
+
+    // Render a single AI dataset as a pretty-printed JSON card.
+    private renderAiCard(d: { test: string; json: string }): string {
+        let pretty = d.json;
+        try {
+            pretty = JSON.stringify(JSON.parse(d.json), null, 2);
+        } catch {
+            /* keep raw if not parseable */
+        }
+        return `
+        <div class="ai-card">
+            <div class="ai-card-title">🤖 ${this.escapeHtml(d.test)}</div>
+            <pre class="ai-json">${this.escapeHtml(pretty)}</pre>
+        </div>`;
+    }
+
+    private generateTestTable(): string {
+        let html = '<div class="test-table-container">';
+
+        html += `
+        <table class="test-table">
+            <thead>
+                <tr>
+                    <th>S.No</th>
+                    <th>Suite</th>
+                    <th>Test Name</th>
+                    <th>Author</th>
+                    <th>Priority</th>
+                    <th>Tags</th>
+                    <th>File</th>
+                    <th>Start Time</th>
+                    <th>End Time</th>
+                    <th>Duration</th>
+                    <th>Status</th>
+                    <th>Screenshot</th>
+                    <th>Video</th>
+                    <th>Trace</th>
+                </tr>
+            </thead>
+            <tbody>`;
+
+        let serialNo = 1;
+
+        for (const test of this.testResults) {
+            const statusClass = test.status === 'passed' ? 'passed' : test.status === 'failed' || test.status === 'timedOut' ? 'failed' : 'skipped';
+            const statusText = test.status === 'passed' ? 'Passed' : test.status === 'failed' || test.status === 'timedOut' ? 'Failed' : 'Skipped';
+            const duration = this.formatDuration(test.duration);
+            const tagsData = test.tags.join(',').toLowerCase();
+
+            const testGroup = test.tags.find(t => t.includes('P0') || t.includes('P1') || t.includes('P2')) ||
+                test.describePath[0] || 'E2E';
+
+            const author = process.env.TEST_AUTHOR || 'TTA-QA';
+
+            const testStartTime = new Date(this.startTime.getTime());
+            const testEndTime = new Date(testStartTime.getTime() + test.duration);
+
+            const firstScreenshot = test.screenshots[0]?.path || (test.steps.find(s => s.screenshot)?.screenshot) || '';
+
+            html += `
+                <tr class="test-row ${statusClass}" data-test-id="${test.id}" data-tags="${tagsData}">
+                    <td class="col-sno">${serialNo}</td>
+                    <td class="col-suite">${this.escapeHtml(test.describePath[0] || 'Default')}</td>
+                    <td class="col-testname">
+                        <span class="test-name-link" onclick="toggleTestDetail('${test.id}')">${this.escapeHtml(test.title)}</span>
+                    </td>
+                    <td class="col-author">${author}</td>
+                    <td class="col-group">${this.escapeHtml(testGroup)}</td>
+                    <td class="col-tags">${test.tags.map(t => `<span class="tag">${t}</span>`).join(' ')}</td>
+                    <td class="col-file">${this.escapeHtml(test.location)}</td>
+                    <td class="col-starttime">${this.formatTime(testStartTime)}</td>
+                    <td class="col-endtime">${this.formatTime(testEndTime)}</td>
+                    <td class="col-duration">${duration}</td>
+                    <td class="col-status"><span class="status-badge ${statusClass}">${statusText}</span></td>
+                    <td class="col-screenshot">
+                        ${firstScreenshot ? `<a href="${firstScreenshot}" target="_blank" class="screenshot-link">📷 View</a>` : 'N/A'}
+                    </td>
+                    <td class="col-video">
+                        ${test.video ? `<a href="${test.video}" target="_blank" class="video-link-cell">▶️ Play</a>` : 'N/A'}
+                    </td>
+                    <td class="col-trace">
+                        ${test.trace ? `<a href="${test.trace}" target="_blank" class="trace-link-cell">📁 View</a>` : 'N/A'}
+                    </td>
+                </tr>
+                <tr class="test-detail-row" id="detail-row-${test.id}" style="display: none;">
+                    <td colspan="14">
+                        <div class="test-detail" id="detail-${test.id}">
+                            ${this.generateTestDetailPanel(test)}
+                        </div>
+                    </td>
+                </tr>`;
+
+            serialNo++;
+        }
+
+        html += `
+            </tbody>
+        </table>
+        </div>`;
+
+        return html;
+    }
+
+    private generateTestDetailPanel(test: TestData): string {
+        let html = '<div class="detail-panel">';
+
+        if (test.error) {
+            html += `
+            <div class="detail-section error-section">
+                <div class="section-header" onclick="toggleSection(this)">
+                    <span class="section-arrow">▼</span> Errors
+                </div>
+                <div class="section-content">
+                    <div class="error-box">
+                        <pre class="error-message">${this.escapeHtml(test.error)}</pre>
+                        ${test.errorStack ? `<details class="stack-details"><summary>Call Stack</summary><pre class="stack-trace-content">${this.escapeHtml(test.errorStack)}</pre></details>` : ''}
+                    </div>
+                </div>
+            </div>`;
+        }
+
+        if (test.logs.length > 0) {
+            html += `
+            <div class="detail-section logs-section">
+                <div class="section-header" onclick="toggleSection(this)">
+                    <span class="section-arrow">▼</span> Test Logs (${test.logs.length} lines)
+                </div>
+                <div class="section-content">
+                    <div class="step-console-content">`;
+
+            for (const log of test.logs) {
+                html += `<div class="console-line">${this.escapeHtml(log)}</div>`;
+            }
+
+            html += `
+                    </div>
+                </div>
+            </div>`;
+        }
+
+        if (test.steps.length > 0) {
+            html += `
+            <div class="detail-section steps-section">
+                <div class="section-header" onclick="toggleSection(this)">
+                    <span class="section-arrow">▼</span> Test Steps
+                </div>
+                <div class="section-content">
+                    <div class="steps-list">`;
+
+            for (let stepIndex = 0; stepIndex < test.steps.length; stepIndex++) {
+                const step = test.steps[stepIndex];
+                const stepIcon = step.status === 'passed' ? '✓' : '✗';
+                const stepClass = step.status;
+                const stepId = `step-${test.id}-${stepIndex}`;
+
+                html += `
+                    <div class="step-item-container">
+                        <div class="step-item ${stepClass} expandable" onclick="toggleStepDetails(this, '${stepId}-details')">
+                            <span class="step-expand-icon">▶</span>
+                            <span class="step-icon ${stepClass}">${stepIcon}</span>
+                            <span class="step-name">${this.escapeHtml(step.title)}</span>
+                            <span class="step-time">${this.formatDuration(step.duration)}</span>
+                        </div>
+                        <div id="${stepId}-details" class="step-details" style="display: none;">
+                            <div class="step-meta">
+                                <span class="step-meta-item">⏱️ Started: ${step.startTime || 'N/A'}</span>
+                                <span class="step-meta-item">⏳ Duration: ${this.formatDuration(step.duration)}</span>
+                                <span class="step-meta-item">🎬 Video: ${this.formatVideoTime(step.videoStartTime || 0)} - ${this.formatVideoTime(step.videoEndTime || 0)}</span>
+                            </div>`;
+
+                if (step.consoleLogs && step.consoleLogs.length > 0) {
+                    html += `
+                            <div class="step-console">
+                                <div class="step-console-header">📋 Console Output (${step.consoleLogs.length} lines)</div>
+                                <div class="step-console-content">`;
+                    for (const log of step.consoleLogs) {
+                        html += `<div class="console-line">${this.escapeHtml(log)}</div>`;
+                    }
+                    html += `
+                                </div>
+                            </div>`;
+                }
+
+                if (step.screenshot) {
+                    html += `
+                            <div class="step-screenshot">
+                                <div class="step-screenshot-header">📷 Screenshot</div>
+                                <a href="${step.screenshot}" target="_blank">
+                                    <img src="${step.screenshot}" alt="Step Screenshot" class="step-screenshot-img"/>
+                                </a>
+                            </div>`;
+                }
+
+                if (step.error) {
+                    html += `
+                            <div class="step-error">
+                                <div class="step-error-header">❌ Error</div>
+                                <div class="step-error-message">${this.escapeHtml(step.error)}</div>
+                            </div>`;
+                    if (step.stackTrace) {
+                        html += `
+                            <div class="step-stack-trace">
+                                <div class="step-stack-header">📜 Stack Trace</div>
+                                <pre class="step-stack-content">${this.escapeHtml(step.stackTrace)}</pre>
+                            </div>`;
+                    }
+                }
+
+                html += `
+                        </div>
+                    </div>`;
+            }
+
+            html += `
+                    </div>
+                </div>
+            </div>`;
+        }
+
+        if (test.screenshots.length > 0) {
+            html += `
+            <div class="detail-section screenshots-section">
+                <div class="section-header" onclick="toggleSection(this)">
+                    <span class="section-arrow">▼</span> Screenshots
+                </div>
+                <div class="section-content">
+                    <div class="screenshots-grid">`;
+
+            for (const screenshot of test.screenshots) {
+                html += `
+                    <div class="screenshot-item">
+                        <a href="${screenshot.path}" target="_blank" class="screenshot-link">
+                            <img src="${screenshot.path}" alt="${screenshot.name}" class="screenshot-preview"/>
+                        </a>
+                        <div class="screenshot-name">📎 ${this.escapeHtml(screenshot.name)}</div>
+                    </div>`;
+            }
+
+            html += `
+                    </div>
+                </div>
+            </div>`;
+        }
+
+        if (test.trace) {
+            html += `
+            <div class="detail-section traces-section">
+                <div class="section-header" onclick="toggleSection(this)">
+                    <span class="section-arrow">▼</span> Traces
+                </div>
+                <div class="section-content">
+                    <a href="${test.trace}" download class="trace-download">📁 trace</a>
+                </div>
+            </div>`;
+        }
+
+        if (test.video) {
+            html += `
+            <div class="detail-section videos-section">
+                <div class="section-header" onclick="toggleSection(this)">
+                    <span class="section-arrow">▼</span> Videos
+                </div>
+                <div class="section-content">
+                    <video controls class="test-video" src="${test.video}"></video>
+                    <div class="video-link"><a href="${test.video}" target="_blank">📎 video</a></div>
+                </div>
+            </div>`;
+        }
+
+        html += '</div>';
+        return html;
+    }
+
+    private escapeHtml(text: string): string {
+        return text
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
+    }
+
+    private getStyles(): string {
+        return `
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+        /* --- AI Data tab --- */
+        .main-tabs { display: flex; gap: 8px; margin: 16px 0; }
+        .main-tab { padding: 10px 18px; border: 1px solid #cbd5e1; background: #fff; border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 14px; }
+        .main-tab.active { background: #059669; color: #fff; border-color: #059669; }
+        .main-tab-panel { display: none; }
+        .main-tab-panel.active { display: block; }
+        .ai-empty { padding: 24px; background: #f8fafc; border: 1px dashed #cbd5e1; border-radius: 10px; color: #64748b; text-align: center; }
+        .ai-data-list { display: flex; flex-direction: column; gap: 14px; }
+        .ai-card { border: 1px solid #e2e8f0; border-radius: 10px; overflow: hidden; background: #fff; }
+        .ai-card-title { background: #ecfdf5; color: #047857; font-weight: 600; padding: 10px 14px; border-bottom: 1px solid #e2e8f0; }
+        .ai-json { margin: 0; padding: 14px; background: #1e293b; color: #e2e8f0; font-family: 'JetBrains Mono', monospace; font-size: 13px; overflow-x: auto; white-space: pre; }
+        .verdict-file { float: right; font-weight: 400; font-size: 12px; color: #64748b; font-family: 'JetBrains Mono', monospace; }
+        .verdict-body { padding: 14px; }
+        .verdict-badges { display: flex; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+        .verdict-badge { padding: 5px 12px; border-radius: 999px; font-weight: 600; font-size: 13px; color: #fff; background: #64748b; }
+        .verdict-badge.prio { background: #3b82f6; }
+        .verdict-badge.sev-critical { background: #dc2626; }
+        .verdict-badge.sev-high { background: #ef4444; }
+        .verdict-badge.sev-medium { background: #f59e0b; }
+        .verdict-badge.sev-low { background: #22c55e; }
+        .verdict-root { margin-bottom: 12px; color: #1e293b; }
+        .verdict-fixes ul { margin: 6px 0 0 18px; }
+        .verdict-fixes li { margin: 4px 0; color: #334155; }
+        .flaky-wrap { display: flex; flex-direction: column; gap: 14px; }
+        .flaky-compare { color: #64748b; font-size: 14px; }
+        .flaky-compare code { background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-family: 'JetBrains Mono', monospace; }
+        .flaky-counts { display: flex; gap: 14px; }
+        .flaky-count { flex: 1; background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 16px; text-align: center; }
+        .flaky-count.flaky { border-color: #f59e0b; background: #fffbeb; }
+        .flaky-count.fail { border-color: #ef4444; background: #fef2f2; }
+        .fc-num { font-size: 28px; font-weight: 700; color: #1e293b; }
+        .fc-label { font-size: 13px; color: #64748b; margin-top: 4px; }
+        .flaky-list { display: flex; flex-direction: column; gap: 8px; }
+        .flaky-item { background: #fffbeb; border: 1px solid #fcd34d; border-left: 4px solid #f59e0b; border-radius: 8px; padding: 10px 14px; font-weight: 500; color: #92400e; }
+        .flaky-summary { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 14px; color: #334155; line-height: 1.5; }
+
+        :root {
+            --primary: #059669;
+            --primary-light: #10b981;
+            --primary-dark: #047857;
+            --primary-bg: #ecfdf5;
+            --accent: #0d9488;
+            --success: #22c55e;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+            --info: #3b82f6;
+            --dark: #1e293b;
+            --gray-50: #f8fafc;
+            --gray-100: #f1f5f9;
+            --gray-200: #e2e8f0;
+            --gray-300: #cbd5e1;
+            --gray-400: #94a3b8;
+            --gray-500: #64748b;
+            --gray-600: #475569;
+            --gray-700: #334155;
+            --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+            --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+            --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+            --shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
+            --radius: 12px;
+            --radius-sm: 8px;
+            --radius-lg: 16px;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-size: 14px;
+            line-height: 1.6;
+            background: linear-gradient(135deg, var(--gray-100) 0%, var(--primary-bg) 100%);
+            min-height: 100vh;
+            color: var(--gray-700);
+        }
+
+        /* ========== HEADER ========== */
+        .header {
+            background: linear-gradient(135deg, var(--primary) 0%, var(--accent) 50%, var(--primary-dark) 100%);
+            color: white;
+            padding: 40px 20px;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+        .header::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 60%);
+            animation: pulse 15s ease-in-out infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); opacity: 0.5; }
+            50% { transform: scale(1.1); opacity: 0.3; }
+        }
+        .header h1 {
+            font-size: 32px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+            position: relative;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+        .header-subtitle {
+            margin-top: 8px;
+            font-size: 16px;
+            font-weight: 400;
+            opacity: 0.9;
+            position: relative;
+        }
+
+        /* ========== CONTAINER ========== */
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 30px;
+        }
+
+        /* ========== STATS DASHBOARD ========== */
+        .stats-dashboard {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .stat-card {
+            background: white;
+            border-radius: var(--radius);
+            padding: 24px;
+            box-shadow: var(--shadow);
+            transition: transform 0.2s, box-shadow 0.2s;
+            border-left: 4px solid var(--primary);
+        }
+        .stat-card:hover {
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-lg);
+        }
+        .stat-card.passed { border-left-color: var(--success); }
+        .stat-card.failed { border-left-color: var(--danger); }
+        .stat-card.skipped { border-left-color: var(--gray-400); }
+        .stat-value {
+            font-size: 36px;
+            font-weight: 700;
+            color: var(--dark);
+            line-height: 1;
+        }
+        .stat-label {
+            font-size: 13px;
+            color: var(--gray-500);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-top: 8px;
+            font-weight: 500;
+        }
+
+        /* ========== META SECTION ========== */
+        .meta-section {
+            background: white;
+            padding: 20px 24px;
+            margin-bottom: 24px;
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+            display: flex;
+            flex-wrap: wrap;
+            gap: 24px;
+            align-items: center;
+        }
+        .meta-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .meta-label {
+            font-size: 12px;
+            color: var(--gray-500);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 600;
+        }
+        .meta-value {
+            font-weight: 600;
+            color: var(--dark);
+        }
+        .meta-table { display: none; }
+        .env-badge, .browser-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .env-badge {
+            background: linear-gradient(135deg, var(--primary-light) 0%, var(--primary) 100%);
+            color: white;
+            box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3);
+        }
+        .browser-badge {
+            background: var(--gray-100);
+            color: var(--gray-700);
+            border: 1px solid var(--gray-200);
+        }
+
+        /* ========== SUITE & RUN STATUS ========== */
+        .suite-status, .run-status {
+            background: white;
+            padding: 20px 24px;
+            margin-bottom: 24px;
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+        }
+        .suite-status h3, .run-status h3 {
+            color: var(--dark);
+            margin-bottom: 16px;
+            font-size: 16px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .suite-status h3::before { content: '📊'; }
+        .run-status h3::before { content: '🚀'; }
+        .status-table { width: 100%; }
+        .status-table td { padding: 8px 12px; }
+        .passed-count {
+            color: var(--success);
+            font-weight: 700;
+            font-size: 18px;
+        }
+        .failed-count {
+            color: var(--danger);
+            font-weight: 700;
+            font-size: 18px;
+        }
+
+        /* ========== FILTERS ========== */
+        .filters {
+            background: white;
+            padding: 20px 24px;
+            margin-bottom: 24px;
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+            display: flex;
+            flex-wrap: wrap;
+            gap: 30px;
+            align-items: center;
+        }
+        .filter-group {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        .filter-group strong {
+            font-size: 13px;
+            color: var(--gray-600);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .filter-group label {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 16px;
+            background: var(--gray-50);
+            border: 1px solid var(--gray-200);
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        .filter-group label:hover {
+            background: var(--primary-bg);
+            border-color: var(--primary-light);
+        }
+        .filter-group input[type="checkbox"] {
+            accent-color: var(--primary);
+            width: 16px;
+            height: 16px;
+        }
+        .filter-group input[type="checkbox"]:checked + span {
+            color: var(--primary);
+        }
+
+        /* ========== TEST TABLE ========== */
+        .test-table-container {
+            background: white;
+            border-radius: var(--radius);
+            box-shadow: var(--shadow-lg);
+            overflow: hidden;
+        }
+        .test-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            font-size: 13px;
+        }
+        .test-table thead {
+            background: linear-gradient(135deg, var(--dark) 0%, var(--gray-700) 100%);
+            color: white;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+        .test-table th {
+            padding: 16px 12px;
+            text-align: left;
+            font-weight: 600;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border: none;
+            white-space: nowrap;
+        }
+        .test-table td {
+            padding: 14px 12px;
+            border-bottom: 1px solid var(--gray-100);
+            vertical-align: middle;
+        }
+        .test-table tbody tr {
+            background: white;
+            transition: all 0.2s;
+        }
+        .test-table tbody tr:nth-child(even) {
+            background: var(--gray-50);
+        }
+        .test-row:hover {
+            background: var(--primary-bg) !important;
+            transform: scale(1.001);
+        }
+        .test-row.failed {
+            background: #fef2f2 !important;
+            border-left: 3px solid var(--danger);
+        }
+        .test-row.failed:hover {
+            background: #fee2e2 !important;
+        }
+        .test-row.passed {
+            border-left: 3px solid transparent;
+        }
+
+        /* Column widths */
+        .col-sno { width: 50px; text-align: center; font-weight: 600; color: var(--gray-400); }
+        .col-suite { min-width: 120px; }
+        .col-testname { min-width: 280px; }
+        .col-author { width: 80px; }
+        .col-group { width: 80px; }
+        .col-tags { min-width: 120px; }
+        .col-file { min-width: 140px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--gray-500); }
+        .col-starttime, .col-endtime { width: 160px; font-size: 12px; color: var(--gray-500); }
+        .col-duration { width: 80px; text-align: center; font-weight: 600; }
+        .col-status { width: 100px; text-align: center; }
+        .col-screenshot, .col-video, .col-trace { width: 80px; text-align: center; }
+
+        .test-name-link {
+            color: var(--dark);
+            cursor: pointer;
+            text-decoration: none;
+            font-weight: 500;
+            transition: color 0.2s;
+        }
+        .test-name-link:hover {
+            color: var(--primary);
+        }
+
+        /* Status Badges */
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            gap: 4px;
+        }
+        .status-badge.passed {
+            background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
+            color: white;
+            box-shadow: 0 2px 8px rgba(34, 197, 94, 0.3);
+        }
+        .status-badge.failed {
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+            color: white;
+            box-shadow: 0 2px 8px rgba(239, 68, 68, 0.3);
+        }
+        .status-badge.skipped {
+            background: var(--gray-200);
+            color: var(--gray-600);
+        }
+
+        /* Action Links */
+        .screenshot-link, .video-link-cell, .trace-link-cell {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 6px 12px;
+            border-radius: var(--radius-sm);
+            text-decoration: none;
+            font-size: 12px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        .screenshot-link {
+            background: var(--primary-bg);
+            color: var(--primary);
+        }
+        .screenshot-link:hover {
+            background: var(--primary);
+            color: white;
+        }
+        .video-link-cell {
+            background: #fef3c7;
+            color: #d97706;
+        }
+        .video-link-cell:hover {
+            background: #f59e0b;
+            color: white;
+        }
+        .trace-link-cell {
+            background: #ede9fe;
+            color: #7c3aed;
+        }
+        .trace-link-cell:hover {
+            background: #8b5cf6;
+            color: white;
+        }
+
+        /* Tags */
+        .tag {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+            margin: 2px;
+            background: var(--primary-bg);
+            color: var(--primary-dark);
+            border: 1px solid var(--primary-light);
+        }
+
+        /* ========== TEST DETAIL PANEL ========== */
+        .test-detail-row { background: var(--gray-50) !important; }
+        .test-detail-row td { padding: 0 !important; }
+        .test-detail {
+            margin: 16px 24px;
+            border-radius: var(--radius);
+            background: white;
+            box-shadow: var(--shadow);
+            overflow: hidden;
+        }
+        .detail-panel { padding: 0; }
+        .detail-section {
+            border-bottom: 1px solid var(--gray-100);
+        }
+        .detail-section:last-child { border-bottom: none; }
+        .section-header {
+            padding: 16px 20px;
+            background: var(--gray-50);
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            transition: background 0.2s;
+        }
+        .section-header:hover { background: var(--gray-100); }
+        .section-arrow {
+            font-size: 12px;
+            color: var(--gray-400);
+            transition: transform 0.3s;
+        }
+        .section-collapsed .section-arrow { transform: rotate(-90deg); }
+        .section-collapsed .section-content { display: none; }
+        .section-content { padding: 20px; }
+
+        /* Error Section */
+        .error-section .section-header {
+            background: #fef2f2;
+            color: var(--danger);
+        }
+        .error-box {
+            background: white;
+            border: 1px solid #fecaca;
+            border-radius: var(--radius-sm);
+            padding: 16px;
+            border-left: 4px solid var(--danger);
+        }
+        .error-message {
+            margin: 0;
+            color: var(--danger);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            white-space: pre-wrap;
+            word-break: break-word;
+            line-height: 1.6;
+        }
+        .stack-details { margin-top: 16px; }
+        .stack-details summary {
+            cursor: pointer;
+            color: var(--gray-500);
+            font-size: 13px;
+            font-weight: 500;
+            padding: 8px 0;
+        }
+        .stack-trace-content {
+            margin: 12px 0 0 0;
+            padding: 16px;
+            background: var(--dark);
+            color: #a7f3d0;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            border-radius: var(--radius-sm);
+            overflow-x: auto;
+            max-height: 300px;
+            overflow-y: auto;
+            line-height: 1.6;
+        }
+
+        /* Steps Section */
+        .steps-list {
+            background: white;
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--gray-100);
+            overflow: hidden;
+        }
+        .step-item-container {
+            border-bottom: 1px solid var(--gray-100);
+        }
+        .step-item-container:last-child { border-bottom: none; }
+        .step-item {
+            display: flex;
+            align-items: center;
+            padding: 14px 16px;
+            transition: background 0.2s;
+        }
+        .step-item.expandable { cursor: pointer; }
+        .step-item.expandable:hover { background: var(--gray-50); }
+        .step-item.failed { background: #fef2f2; }
+        .step-expand-icon {
+            width: 20px;
+            font-size: 10px;
+            color: var(--gray-400);
+            transition: transform 0.3s;
+        }
+        .step-item.expanded .step-expand-icon { transform: rotate(90deg); }
+        .step-icon {
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-right: 12px;
+            font-size: 14px;
+        }
+        .step-icon.passed {
+            background: #dcfce7;
+            color: var(--success);
+        }
+        .step-icon.failed {
+            background: #fee2e2;
+            color: var(--danger);
+        }
+        .step-name {
+            flex: 1;
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--dark);
+        }
+        .step-time {
+            color: var(--gray-500);
+            font-size: 12px;
+            font-family: 'JetBrains Mono', monospace;
+            background: var(--gray-100);
+            padding: 4px 10px;
+            border-radius: 12px;
+        }
+        .step-details {
+            background: var(--gray-50);
+            border-top: 1px solid var(--gray-100);
+            padding: 16px 20px 16px 56px;
+        }
+        .step-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            color: var(--gray-500);
+            font-size: 12px;
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 1px dashed var(--gray-200);
+        }
+        .step-meta-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .step-console { margin-bottom: 16px; }
+        .step-console-header {
+            font-weight: 600;
+            color: var(--dark);
+            margin-bottom: 10px;
+            font-size: 13px;
+        }
+        .step-console-content {
+            background: var(--dark);
+            color: #a7f3d0;
+            padding: 16px;
+            border-radius: var(--radius-sm);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            line-height: 1.6;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .console-line {
+            padding: 4px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+        .console-line:last-child { border-bottom: none; }
+
+        /* Screenshots */
+        .step-screenshot { margin-bottom: 16px; }
+        .step-screenshot-header { font-weight: 600; color: var(--dark); margin-bottom: 10px; }
+        .step-screenshot-img {
+            max-width: 100%;
+            max-height: 250px;
+            border: 1px solid var(--gray-200);
+            border-radius: var(--radius-sm);
+            box-shadow: var(--shadow);
+        }
+        .step-error { margin-bottom: 16px; }
+        .step-error-header { font-weight: 600; color: var(--danger); margin-bottom: 10px; }
+        .step-error-message {
+            background: #fef2f2;
+            color: #b91c1c;
+            padding: 16px;
+            border-radius: var(--radius-sm);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            border-left: 4px solid var(--danger);
+        }
+        .step-stack-trace { margin-top: 12px; }
+        .step-stack-header { font-weight: 600; color: var(--warning); margin-bottom: 10px; }
+        .step-stack-content {
+            background: #fffbeb;
+            color: #92400e;
+            padding: 16px;
+            border-radius: var(--radius-sm);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            max-height: 200px;
+            overflow-y: auto;
+            margin: 0;
+            border-left: 4px solid var(--warning);
+        }
+
+        /* Screenshots Grid */
+        .screenshots-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: 20px;
+        }
+        .screenshot-item {
+            background: white;
+            border: 1px solid var(--gray-200);
+            border-radius: var(--radius);
+            overflow: hidden;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .screenshot-item:hover {
+            transform: translateY(-4px);
+            box-shadow: var(--shadow-lg);
+        }
+        .screenshot-preview {
+            width: 100%;
+            height: 160px;
+            object-fit: cover;
+            display: block;
+        }
+        .screenshot-name {
+            padding: 12px;
+            font-size: 12px;
+            color: var(--gray-600);
+            border-top: 1px solid var(--gray-100);
+            font-weight: 500;
+        }
+
+        /* Trace & Video */
+        .trace-download {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px 20px;
+            background: linear-gradient(135deg, var(--primary-bg) 0%, #d1fae5 100%);
+            color: var(--primary-dark);
+            text-decoration: none;
+            border-radius: var(--radius-sm);
+            font-size: 13px;
+            font-weight: 600;
+            transition: all 0.2s;
+            border: 1px solid var(--primary-light);
+        }
+        .trace-download:hover {
+            background: var(--primary);
+            color: white;
+            border-color: var(--primary);
+        }
+        .test-video {
+            max-width: 100%;
+            max-height: 450px;
+            border-radius: var(--radius);
+            box-shadow: var(--shadow-lg);
+        }
+        .video-link { margin-top: 12px; font-size: 13px; }
+        .video-link a { color: var(--primary); font-weight: 500; }
+
+        /* ========== MODAL ========== */
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.95);
+            justify-content: center;
+            align-items: center;
+            backdrop-filter: blur(4px);
+        }
+        .modal.active { display: flex; }
+        .modal-content {
+            max-width: 95%;
+            max-height: 95%;
+            object-fit: contain;
+            border-radius: var(--radius);
+            box-shadow: var(--shadow-xl);
+        }
+        .modal-close {
+            position: absolute;
+            top: 20px;
+            right: 30px;
+            color: white;
+            font-size: 40px;
+            cursor: pointer;
+            transition: color 0.2s, transform 0.2s;
+        }
+        .modal-close:hover {
+            color: var(--primary-light);
+            transform: scale(1.1);
+        }
+
+        /* ========== FOOTER ========== */
+        .report-footer {
+            text-align: center;
+            padding: 30px 20px;
+            background: linear-gradient(135deg, var(--dark) 0%, var(--gray-700) 100%);
+            color: white;
+            margin-top: 40px;
+        }
+        .report-footer p {
+            font-size: 14px;
+            opacity: 0.9;
+        }
+        .report-footer a {
+            color: var(--primary-light);
+            text-decoration: none;
+            font-weight: 600;
+            transition: color 0.2s;
+        }
+        .report-footer a:hover {
+            color: white;
+            text-decoration: underline;
+        }
+
+        /* ========== RESPONSIVE ========== */
+        @media (max-width: 1200px) {
+            .container { padding: 20px; }
+            .test-table { font-size: 12px; }
+        }
+        @media (max-width: 768px) {
+            .header { padding: 30px 15px; }
+            .header h1 { font-size: 24px; }
+            .meta-section, .filters { flex-direction: column; align-items: flex-start; }
+            .stats-dashboard { grid-template-columns: repeat(2, 1fr); }
+        }
+        `;
+    }
+
+    private getScripts(): string {
+        return `
+        function switchMainTab(name, btn) {
+            document.querySelectorAll('.main-tab-panel').forEach(p => p.classList.remove('active'));
+            document.querySelectorAll('.main-tab').forEach(t => t.classList.remove('active'));
+            const panel = document.getElementById('tab-' + name);
+            if (panel) panel.classList.add('active');
+            if (btn) btn.classList.add('active');
+        }
+
+        function toggleFileGroup(header) {
+            const fileGroup = header.parentElement;
+            fileGroup.classList.toggle('collapsed');
+        }
+
+        function toggleTestDetail(testId) {
+            const detailRow = document.getElementById('detail-row-' + testId);
+            if (detailRow) {
+                detailRow.style.display = detailRow.style.display === 'none' ? 'table-row' : 'none';
+            }
+        }
+
+        function toggleSection(header) {
+            const section = header.parentElement;
+            section.classList.toggle('section-collapsed');
+        }
+
+        function toggleStepDetails(stepElement, detailsId) {
+            const details = document.getElementById(detailsId);
+            if (details) {
+                if (details.style.display === 'none') {
+                    details.style.display = 'block';
+                    stepElement.classList.add('expanded');
+                } else {
+                    details.style.display = 'none';
+                    stepElement.classList.remove('expanded');
+                }
+            }
+        }
+
+        function filterByStatus(checkbox) {
+            const allCheckbox = document.querySelector('.status-filter[value="all"]');
+            if (checkbox.value === 'all') {
+                if (checkbox.checked) {
+                    document.querySelectorAll('.status-filter:not([value="all"])').forEach(cb => cb.checked = false);
+                }
+            } else {
+                if (checkbox.checked && allCheckbox) {
+                    allCheckbox.checked = false;
+                }
+                const anyChecked = document.querySelectorAll('.status-filter:not([value="all"]):checked').length > 0;
+                if (!anyChecked && allCheckbox) {
+                    allCheckbox.checked = true;
+                }
+            }
+            applyFilters();
+        }
+
+        function filterByGroup(checkbox) {
+            const allCheckbox = document.querySelector('.group-filter[value="all"]');
+            if (checkbox.value === 'all') {
+                if (checkbox.checked) {
+                    document.querySelectorAll('.group-filter:not([value="all"])').forEach(cb => cb.checked = false);
+                }
+            } else {
+                if (checkbox.checked && allCheckbox) {
+                    allCheckbox.checked = false;
+                }
+                const anyChecked = document.querySelectorAll('.group-filter:not([value="all"]):checked').length > 0;
+                if (!anyChecked && allCheckbox) {
+                    allCheckbox.checked = true;
+                }
+            }
+            applyFilters();
+        }
+
+        function applyFilters() {
+            const statusAll = document.querySelector('.status-filter[value="all"]')?.checked;
+            const groupAll = document.querySelector('.group-filter[value="all"]')?.checked;
+            const statusFilters = Array.from(document.querySelectorAll('.status-filter:not([value="all"]):checked')).map(f => f.value);
+            const groupFilters = Array.from(document.querySelectorAll('.group-filter:not([value="all"]):checked')).map(f => f.value);
+
+            document.querySelectorAll('.test-row').forEach(row => {
+                let statusMatch = statusAll;
+                if (!statusMatch) {
+                    const rowStatus = row.classList.contains('passed') ? 'passed' :
+                                       row.classList.contains('failed') ? 'failed' : 'skipped';
+                    statusMatch = statusFilters.includes(rowStatus);
+                }
+
+                let groupMatch = groupAll;
+                if (!groupMatch) {
+                    const tags = row.getAttribute('data-tags') || '';
+                    groupMatch = groupFilters.some(g => tags.toLowerCase().includes(g.toLowerCase()));
+                }
+
+                const testId = row.getAttribute('data-test-id');
+                const detailRow = document.getElementById('detail-row-' + testId);
+
+                row.style.display = (statusMatch && groupMatch) ? '' : 'none';
+                if (detailRow && detailRow.style.display !== 'none') {
+                    detailRow.style.display = (statusMatch && groupMatch) ? 'table-row' : 'none';
+                }
+            });
+        }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            const modal = document.getElementById('screenshotModal');
+            const modalImg = document.getElementById('modalImage');
+            const closeBtn = document.querySelector('.modal-close');
+
+            document.querySelectorAll('.screenshot-link').forEach(link => {
+                link.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (modal && modalImg) {
+                        modal.classList.add('active');
+                        modalImg.src = this.href;
+                    }
+                });
+            });
+
+            if (closeBtn) {
+                closeBtn.addEventListener('click', function() {
+                    modal.classList.remove('active');
+                });
+            }
+            if (modal) {
+                modal.addEventListener('click', function(e) {
+                    if (e.target === modal) {
+                        modal.classList.remove('active');
+                    }
+                });
+            }
+            document.addEventListener('keydown', function(e) {
+                if (e.key === 'Escape' && modal) {
+                    modal.classList.remove('active');
+                }
+            });
+
+            // Auto-expand failed tests
+            document.querySelectorAll('.test-row.failed').forEach(row => {
+                const testId = row.getAttribute('data-test-id');
+                if (testId) {
+                    toggleTestDetail(testId);
+                }
+            });
+        });
+        `;
     }
 }
+
+export default CustomTTAReporter;

@@ -1,4 +1,4 @@
-import { Locator, Page } from '@playwright/test';
+import { expect, Locator, Page } from '@playwright/test';
 import { BasePage } from './BasePage';
 
 /**
@@ -38,6 +38,15 @@ export class LoginPage extends BasePage {
         await this.el.fill(this.usernameInput, username);
         await this.el.fill(this.passwordInput, password);
         await this.el.click(this.loginButton);
+    }
+
+    /**
+     * Wait until a successful login lands on the inventory page. Mirrors the
+     * assertion used by the login spec.
+     */
+    async waitForLoginSuccessful(): Promise<void> {
+        await expect(this.page).toHaveURL(/\/inventory\/?$/);
+        await expect(this.page.locator('[data-test="inventory-sidebar-link"]')).toBeVisible();
     }
 
     async getErrorMessage(): Promise<string> {
