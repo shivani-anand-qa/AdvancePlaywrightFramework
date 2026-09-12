@@ -14,7 +14,7 @@ node_modules/
 logs/
 
 # Custom reporter output
-/tta-report/
+/custom-report/
 /reports/
 
 # Local tool state

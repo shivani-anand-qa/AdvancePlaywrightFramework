@@ -17,6 +17,7 @@ export class LoginPage extends BasePage {
     private readonly passwordInput: Locator;
     private readonly loginButton: Locator;
     private readonly errorBox: Locator;
+    private readonly inventoryTitle: Locator;
     private readonly loginCredentialsHint: Locator;
 
     constructor(page: Page) {
@@ -24,6 +25,7 @@ export class LoginPage extends BasePage {
         this.usernameInput = page.locator('[data-test="username"]');
         this.passwordInput = page.locator('[data-test="password"]');
         this.loginButton = page.locator('[data-test="login-button"]');
+        this.inventoryTitle = page.locator('[data-test="title"]');
         this.errorBox = page.locator('[data-test="error"]');
         this.loginCredentialsHint = page.locator('[data-test="login-credentials"]');
     }
@@ -38,6 +40,7 @@ export class LoginPage extends BasePage {
         await this.el.fill(this.usernameInput, username);
         await this.el.fill(this.passwordInput, password);
         await this.el.click(this.loginButton);
+
     }
 
     /**
@@ -47,6 +50,7 @@ export class LoginPage extends BasePage {
     async waitForLoginSuccessful(): Promise<void> {
         await expect(this.page).toHaveURL(/\/inventory\/?$/);
         await expect(this.page.locator('[data-test="inventory-sidebar-link"]')).toBeVisible();
+        await expect(this.inventoryTitle).toHaveText('Products');
     }
 
     async getErrorMessage(): Promise<string> {

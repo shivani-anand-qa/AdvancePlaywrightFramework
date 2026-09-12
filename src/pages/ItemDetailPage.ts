@@ -2,7 +2,7 @@ import { expect, Locator, Page } from '@playwright/test';
 import { BasePage } from './BasePage';
 
 export class ItemDetailPage extends BasePage {
-    static readonly PATH = '/playwright/ttacart/inventory-item';
+    static readonly PATH = '/playwright/ttacart/inventory-item.html';
 
     private readonly itemName: Locator;
     private readonly itemPrice: Locator;
@@ -36,7 +36,7 @@ export class ItemDetailPage extends BasePage {
         return this.el.getText(this.itemName);
     }
     async assertLoaded(id: string): Promise<void> {
-        await expect(this.page).toHaveURL(new RegExp(`inventory-item\\?id=${id}`));
+        await expect(this.page).toHaveURL(new RegExp(`inventory-item\\.html\\?id=${id}`));
         await expect(this.itemName).toBeVisible();
     }
 

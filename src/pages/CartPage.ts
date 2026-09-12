@@ -9,7 +9,6 @@ import { BasePage } from './BasePage';
  *   await cart.removeItem('tta-practice-backpack');
  *   await cart.checkout();
  */
-
 export class CartPage extends BasePage {
     static readonly PATH = '/playwright/ttacart/cart.html';
 
@@ -49,14 +48,13 @@ export class CartPage extends BasePage {
         await this.el.click(this.page.locator(`[data-test="remove-${id}"]`));
     }
 
+    async continueShopping(): Promise<void> {
+        await this.el.click(this.continueShoppingLink);
+        await this.page.waitForLoadState('domcontentloaded');
+    }
+
     async checkout(): Promise<void> {
         await this.el.click(this.checkoutButton);
         await this.page.waitForLoadState('domcontentloaded');
     }
-
-    async continueShopping(): Promise<void> {
-        await this.el.click(this.continueShoppingLink);
-        await this.page.waitForLoadState('domcontentloaded')
-    }
-
 }

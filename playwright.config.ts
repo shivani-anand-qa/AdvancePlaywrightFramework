@@ -1,8 +1,5 @@
 import { defineConfig, devices } from '@playwright/test';
 import dotenv from 'dotenv';
-import { ATTACH_SCREENSHOTS } from './src/config/screenshotFlag';
-
-dotenv.config();
 
 function resolveBaseURL(): string {
   if (process.env.BASE_URL) return process.env.BASE_URL;
@@ -49,7 +46,7 @@ export default defineConfig({
   use: {
     baseURL: resolveBaseURL(),
     headless: true,
-    screenshot: ATTACH_SCREENSHOTS ? 'only-on-failure' : 'off',
+    screenshot: 'only-on-failure',
     video: 'on',
     trace: 'on'
   },
