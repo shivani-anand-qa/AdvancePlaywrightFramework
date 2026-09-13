@@ -11,7 +11,7 @@ import { BasePage } from './BasePage';
 
 export class LoginPage extends BasePage {
 
-    static readonly PATH = '/playwright/ttacart/index.html';
+    static readonly PATH = '/playwright/ttacart/';
 
     private readonly usernameInput: Locator;
     private readonly passwordInput: Locator;

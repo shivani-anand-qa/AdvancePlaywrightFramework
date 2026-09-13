@@ -1,6 +1,8 @@
 import { defineConfig, devices } from '@playwright/test';
 import dotenv from 'dotenv';
 
+const ATTACH_SCREENSHOTS = process.env.ATTACH_SCREENSHOTS?.toLowerCase() === 'true';
+
 function resolveBaseURL(): string {
   if (process.env.BASE_URL) return process.env.BASE_URL;
   const env = (process.env.TTA_ENV || 'qa').toLowerCase();
@@ -38,15 +40,15 @@ export default defineConfig({
   retries: process.env.CI ? 2 : 0,
 
   reporter: [
-    ['html'],
+    ['html', { open: 'never' }],
     ['list'],
     ['./src/utils/CustomReporter.ts'],
   ],
 
   use: {
     baseURL: resolveBaseURL(),
-    headless: true,
-    screenshot: 'only-on-failure',
+    headless: false,
+    screenshot: ATTACH_SCREENSHOTS ? 'only-on-failure' : 'off',
     video: 'on',
     trace: 'on'
   },

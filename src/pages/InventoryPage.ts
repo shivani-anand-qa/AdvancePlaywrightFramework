@@ -2,7 +2,7 @@ import { expect, Locator, Page } from '@playwright/test';
 import { BasePage } from './BasePage';
 
 export class InventoryPage extends BasePage {
-    static readonly PATH = '/playwright/ttacart/inventory.html';
+    static readonly PATH = '/playwright/ttacart/inventory';
 
     private readonly title: Locator;
     private readonly sortDropdown: Locator;

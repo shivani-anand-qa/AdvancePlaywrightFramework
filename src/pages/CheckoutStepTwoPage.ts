@@ -9,7 +9,7 @@ import { BasePage } from './BasePage';
  * so we parse the trailing dollar amount with a small regex helper.
  */
 export class CheckoutStepTwoPage extends BasePage {
-    static readonly PATH = '/playwright/ttacart/checkout-step-two.html';
+    static readonly PATH = '/playwright/ttacart/checkout-step-two';
 
     private readonly title: Locator;
     private readonly subtotalLabel: Locator;

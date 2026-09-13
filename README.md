@@ -14,15 +14,52 @@ A TypeScript Playwright test automation framework for the TTACart demo app, buil
 
 ```
 src/
-  pages/          Page Object classes (BasePage, LoginPage, CartPage, ...)
-  tests/          Spec files
+  pages/          Page Object classes (BasePage, LoginPage, InventoryPage, CartPage,
+                   CheckoutStepOnePage, CheckoutStepTwoPage, CheckoutCompletePage, ...)
+  fixtures/
+    test-base.ts  Custom `test`/`expect`, pre-wired with a fixture for every Page
+                   Object, plus reusable state fixtures (see below)
+  config/
+    credentials.ts  Login credentials sourced from env vars
+  testdata/
+    logintestdata.json  Shared password + all TTACart usernames
+  tests/
+    login/        Login spec(s) against the raw Page Objects
+    e2e/          End-to-end specs (checkout flow, fixture-driven login/inventory/cart)
   utils/
     UtilElementLocator.ts  Wraps Playwright locators/actions with logging
     CustomReporter.ts      Custom Playwright HTML reporter
-    DataGenerator.ts       Test data generation helpers
+    DataGenerator.ts       Faker-backed test data generation helpers
+    visualStep.ts          test.step wrapper that optionally attaches screenshots
     logger.ts              winston logger factory
 playwright.config.ts
 ```
+
+### Fixtures (`src/fixtures/test-base.ts`)
+
+Import `test`/`expect` from `@fixtures/test-base` instead of `@playwright/test` to get every Page Object handed to you pre-constructed:
+
+```ts
+import { test, expect } from '@fixtures/test-base';
+
+test('add to cart', async ({ inventoryPage, cartPage }) => {
+    await inventoryPage.open();
+    await inventoryPage.addToCart('test-allthethings-tshirt-red');
+    await cartPage.open();
+    expect(await cartPage.rowCount()).toBe(1);
+});
+```
+
+Plain page-object fixtures (`loginPage`, `inventoryPage`, `itemDetailPage`, `cartPage`, `checkoutStepOnePage`, `checkoutStepTwoPage`, `checkoutCompletePage`) hand over constructed objects without navigating anywhere. On top of those, a few **state fixtures** perform reusable setup only when a test asks for one:
+
+| Fixture | Ends at |
+| --- | --- |
+| `invalidLogin` | Login page, after submitting a random/invalid username+password |
+| `validLogin` | Inventory page, logged in as `standard_user` (from `logintestdata.json`) |
+| `loginWithInventory` | Inventory page, logged in and asserted fully loaded |
+| `loginWithSelectedItem` | Inventory page, logged in with one item already added to the cart |
+
+See `src/tests/e2e/e2e_usingfixture.spec.ts` for usage of each.
 
 ## Getting started
 
@@ -40,7 +77,7 @@ npx playwright test
 Run a single spec:
 
 ```bash
-npx playwright test src/tests/login.spec.ts
+npx playwright test src/tests/e2e/e2e-checkout.spec.ts
 ```
 
 ### Environment
@@ -53,6 +90,21 @@ BASE_URL=http://localhost:3000 npx playwright test
 ```
 
 Supported `TTA_ENV` values: `qa`, `dev`/`local`, `stg`/`stage`/`staging`, `prod`/`production`, `api`.
+
+`src/tests/e2e/e2e-checkout.spec.ts` logs in via `src/config/credentials.ts`, which reads the standard-user login from env vars — export these before running it:
+
+```bash
+export STANDARD_USER=standard_user
+export TTA_SECRET=tta_secret
+npx playwright test src/tests/e2e/e2e-checkout.spec.ts
+```
+
+(`src/tests/e2e/e2e_usingfixture.spec.ts` doesn't need these — it gets its credentials from `src/testdata/logintestdata.json` instead.)
+
+Other env vars:
+
+- `LOG_LEVEL` (default `info`) — winston log level, see `src/utils/logger.ts`
+- `ATTACH_SCREENSHOTS` (default off) — set to `true` to attach a screenshot to the report whenever a `visualStep` fails
 
 ## Reports
 

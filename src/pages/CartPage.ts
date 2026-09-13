@@ -10,7 +10,7 @@ import { BasePage } from './BasePage';
  *   await cart.checkout();
  */
 export class CartPage extends BasePage {
-    static readonly PATH = '/playwright/ttacart/cart.html';
+    static readonly PATH = '/playwright/ttacart/cart';
 
     private readonly title: Locator;
     private readonly itemRows: Locator;

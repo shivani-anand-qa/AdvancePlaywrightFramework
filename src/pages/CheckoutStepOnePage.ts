@@ -11,7 +11,7 @@ import type { CheckoutCustomer as GuestUser } from '@utils/DataGenerator';
  * dealing with flaky UIs.
  */
 export class CheckoutStepOnePage extends BasePage {
-    static readonly PATH = '/playwright/ttacart/checkout-step-one.html';
+    static readonly PATH = '/playwright/ttacart/checkout-step-one';
 
     private readonly title: Locator;
     private readonly firstNameInput: Locator;
