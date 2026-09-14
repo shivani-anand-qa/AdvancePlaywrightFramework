@@ -27,6 +27,9 @@ src/
     login/        Login spec(s) against the raw Page Objects
     e2e/          End-to-end specs (checkout flow, .env-sourced twin, fixture-driven
                    login/inventory/cart)
+  api/
+    01_restfulbooker_raw/  API specs against restful-booker.herokuapp.com (ping,
+                            CRUD flow, isolated-context requests, ...)
   utils/
     UtilElementLocator.ts  Wraps Playwright locators/actions with logging
     CustomReporter.ts      Custom Playwright HTML reporter
@@ -84,6 +87,24 @@ Run a single spec:
 npx playwright test src/tests/e2e/e2e-checkout.spec.ts
 ```
 
+### Projects
+
+There are two Playwright projects, each scoped to its own `testDir` so browser and API tests never mix:
+
+| Project | `testDir` | What runs there |
+| --- | --- | --- |
+| `chromium` | `src/tests` | The TTACart UI suite (headed Chrome) |
+| `api` | `src/api` | Pure API specs (`request` fixture only, no browser) against `restful-booker.herokuapp.com` |
+
+Run just one:
+
+```bash
+npx playwright test --project=api
+npx playwright test --project=chromium
+```
+
+A file only becomes a runnable test if it (a) sits under one of those two `testDir`s and (b) is named with a literal `.spec.ts` or `.test.ts` segment (e.g. `foo.spec.ts` — `foo_spec.ts` is invisible to Playwright's default discovery, no error, it's just silently not picked up).
+
 ### Environment
 
 The base URL is resolved from `TTA_ENV` (default `qa`), or overridden directly with `BASE_URL`:
@@ -127,6 +148,8 @@ python3 -m http.server 8899 -d custom-report
 ```
 
 Screenshots are captured on failure, video and traces are always recorded (see `use` in `playwright.config.ts`).
+
+> **Note:** passing `--reporter=<name>` on the CLI (e.g. `--reporter=list`) replaces the entire `reporter` array from `playwright.config.ts` — it doesn't add to it. That run won't produce a custom report at all. Omit `--reporter` to get all three configured reporters (`html`, `list`, and `CustomReporter.ts`).
 
 ## Type checking
 
