@@ -1,0 +1,442 @@
+<title>The .env Detour</title>
+<style>
+  :root {
+    --bg: #eef0f6;
+    --panel: #f8f9fb;
+    --panel-dot: #d7dae4;
+    --paper: #ffffff;
+    --ink: #1e1e2e;
+    --ink-soft: #5b5c72;
+    --border: #d8d9e6;
+    --accent: #6965db;
+    --accent-soft: #eceafc;
+    --danger: #e03131;
+    --danger-soft: #fdeaea;
+    --success: #2f9e44;
+    --success-soft: #e9f8ee;
+    --warn: #c76a00;
+    --warn-soft: #fdf1e0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #131319;
+      --panel: #1a1b22;
+      --panel-dot: #2d2f3c;
+      --paper: #20212b;
+      --ink: #ecebf5;
+      --ink-soft: #a7a8bd;
+      --border: #34364a;
+      --accent: #a3a0f7;
+      --accent-soft: #2a2864;
+      --danger: #ff8585;
+      --danger-soft: #3a1f22;
+      --success: #6bdb92;
+      --success-soft: #16321f;
+      --warn: #ffc069;
+      --warn-soft: #3a2c14;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #131319;
+    --panel: #1a1b22;
+    --panel-dot: #2d2f3c;
+    --paper: #20212b;
+    --ink: #ecebf5;
+    --ink-soft: #a7a8bd;
+    --border: #34364a;
+    --accent: #a3a0f7;
+    --accent-soft: #2a2864;
+    --danger: #ff8585;
+    --danger-soft: #3a1f22;
+    --success: #6bdb92;
+    --success-soft: #16321f;
+    --warn: #ffc069;
+    --warn-soft: #3a2c14;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", system-ui, sans-serif;
+    padding-inline: 20px;
+    padding-block: 40px 64px;
+  }
+  main {
+    max-width: 760px;
+    margin-inline: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 36px;
+  }
+
+  .eyebrow {
+    font-family: "Kalam", "Comic Sans MS", cursive;
+    font-size: 0.95rem;
+    color: var(--accent);
+    letter-spacing: 0.02em;
+  }
+  h1 {
+    font-family: "Kalam", "Comic Sans MS", cursive;
+    font-weight: 700;
+    font-size: clamp(2rem, 5vw, 2.75rem);
+    line-height: 1.1;
+    margin: 6px 0 0;
+    text-wrap: balance;
+  }
+  .lede {
+    font-size: 1.05rem;
+    line-height: 1.6;
+    color: var(--ink-soft);
+    max-width: 62ch;
+  }
+  .lede code, .legend code, .rule code {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.9em;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.05em 0.4em;
+  }
+
+  figure { margin: 0; }
+  .diagram-panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 18px;
+  }
+  .diagram-panel svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    color: var(--ink);
+  }
+  figcaption {
+    margin-top: 14px;
+    font-size: 0.9rem;
+    color: var(--ink-soft);
+    text-align: center;
+  }
+
+  /* diagram node styling */
+  .n-fill--neutral { fill: var(--paper); }
+  .n-fill--warn    { fill: var(--warn-soft); }
+  .n-fill--danger  { fill: var(--danger-soft); }
+  .n-fill--success { fill: var(--success-soft); }
+  .n-fill--accent  { fill: var(--accent-soft); }
+
+  .n-outline { fill: none; stroke-width: 1.6; }
+  .n-outline--neutral { stroke: var(--ink-soft); }
+  .n-outline--warn    { stroke: var(--warn); }
+  .n-outline--danger  { stroke: var(--danger); }
+  .n-outline--success { stroke: var(--success); stroke-width: 2.2; }
+  .n-outline--accent  { stroke: var(--accent); stroke-width: 2.4; }
+
+  .n-badge-circle { fill: var(--paper); stroke: var(--ink); stroke-width: 1.4; }
+  .n-badge-text   { font-family: "IBM Plex Mono", monospace; font-size: 12px; font-weight: 600; fill: var(--ink); text-anchor: middle; }
+
+  .n-title { font-family: "Kalam", "Comic Sans MS", cursive; font-size: 15px; font-weight: 700; fill: var(--ink); text-anchor: middle; }
+  .n-sub   { font-family: "IBM Plex Sans", sans-serif; font-size: 11px; fill: var(--ink-soft); text-anchor: middle; }
+  .n-code  { font-family: "IBM Plex Mono", monospace; font-size: 10.5px; fill: var(--ink-soft); text-anchor: middle; }
+
+  .edge { fill: none; stroke: var(--ink-soft); stroke-width: 1.6; }
+  .edge-label { font-family: "Kalam", "Comic Sans MS", cursive; font-size: 12px; fill: var(--ink-soft); text-anchor: middle; }
+  .arrowhead { fill: var(--ink-soft); }
+
+  ol.legend {
+    list-style: none;
+    counter-reset: step;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  ol.legend li {
+    counter-increment: step;
+    display: grid;
+    grid-template-columns: 28px 1fr;
+    gap: 12px;
+    align-items: baseline;
+    line-height: 1.55;
+  }
+  ol.legend li::before {
+    content: counter(step);
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ink);
+    border: 1.4px solid var(--ink);
+    border-radius: 999px;
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--paper);
+  }
+  ol.legend b { font-weight: 600; }
+  ol.legend .tag {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-family: "IBM Plex Mono", monospace;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 1px 7px;
+    border-radius: 5px;
+    margin-right: 6px;
+    transform: translateY(-1px);
+  }
+  .tag--warn    { background: var(--warn-soft); color: var(--warn); }
+  .tag--danger  { background: var(--danger-soft); color: var(--danger); }
+  .tag--success { background: var(--success-soft); color: var(--success); }
+  .tag--accent  { background: var(--accent-soft); color: var(--accent); }
+
+  .proofs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  @media (max-width: 560px) {
+    .proofs { grid-template-columns: 1fr; }
+  }
+  .proof-card {
+    background: var(--paper);
+    border: 1.6px solid var(--success);
+    border-radius: 10px;
+    padding: 16px 18px;
+  }
+  .proof-card h3 {
+    font-family: "Kalam", "Comic Sans MS", cursive;
+    margin: 0 0 8px;
+    font-size: 1rem;
+    color: var(--success);
+  }
+  .proof-card p { margin: 0; font-size: 0.92rem; color: var(--ink-soft); line-height: 1.55; }
+  .proof-card pre {
+    margin: 8px 0 0;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.78rem;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    overflow-x: auto;
+    color: var(--ink);
+  }
+
+  .rule {
+    background: var(--accent-soft);
+    border: 1.6px dashed var(--accent);
+    border-radius: 12px;
+    padding: 20px 22px;
+    transform: rotate(-0.4deg);
+  }
+  .rule .eyebrow { color: var(--accent); margin-bottom: 6px; display: block; }
+  .rule p { margin: 0; line-height: 1.6; font-size: 0.98rem; }
+
+  footer {
+    font-size: 0.82rem;
+    color: var(--ink-soft);
+    text-align: center;
+  }
+</style>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Kalam:wght@400;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+
+<main>
+  <header>
+    <span class="eyebrow">learnings / tooltip_env.md</span>
+    <h1>The .env Detour</h1>
+    <p class="lede">
+      Nine steps from "<code>credentials.ts</code> reads a variable that's never loaded" to
+      ".env support that can't take the suite down" — including the fail-fast attempt that
+      got tried, measured, and reverted.
+    </p>
+  </header>
+
+  <figure class="diagram-panel">
+    <svg viewBox="0 0 640 1140" role="img" aria-label="Flowchart: the problem of an unloaded .env leads through installing and wiring dotenv, trying a fail-fast validator that turns out to crash the entire test suite when .env is missing, reverting to a fail-soft fallback in credentials.ts, proving it two ways, and arriving at .env support that cannot break the suite.">
+      <defs>
+        <filter id="sketch1" x="-20%" y="-20%" width="140%" height="140%">
+          <feTurbulence type="fractalNoise" baseFrequency="0.018" numOctaves="2" seed="2" result="n"/>
+          <feDisplacementMap in="SourceGraphic" in2="n" scale="2.6"/>
+        </filter>
+        <filter id="sketch2" x="-20%" y="-20%" width="140%" height="140%">
+          <feTurbulence type="fractalNoise" baseFrequency="0.022" numOctaves="2" seed="9" result="n"/>
+          <feDisplacementMap in="SourceGraphic" in2="n" scale="2.2"/>
+        </filter>
+        <pattern id="dots" width="18" height="18" patternUnits="userSpaceOnUse">
+          <circle cx="2" cy="2" r="1.2" fill="var(--panel-dot)"/>
+        </pattern>
+        <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" class="arrowhead"/>
+        </marker>
+      </defs>
+
+      <rect x="0" y="0" width="640" height="1140" fill="url(#dots)"/>
+
+      <!-- sequential edges -->
+      <path class="edge" marker-end="url(#arrow)" filter="url(#sketch1)" d="M320,116 L320,164"/>
+      <path class="edge" marker-end="url(#arrow)" filter="url(#sketch1)" d="M320,230 L320,278"/>
+      <path class="edge" marker-end="url(#arrow)" filter="url(#sketch1)" d="M320,368 L320,416"/>
+
+      <!-- verify edge (labeled) -->
+      <path class="edge" marker-end="url(#arrow)" filter="url(#sketch1)" d="M320,494 L320,558"/>
+      <text class="edge-label" x="320" y="518"><tspan x="320" dy="0">verify: remove .env,</tspan><tspan x="320" dy="14">run full suite</tspan></text>
+
+      <!-- revert edge (labeled) -->
+      <path class="edge" marker-end="url(#arrow)" filter="url(#sketch1)" d="M320,636 L320,684"/>
+      <text class="edge-label" x="320" y="664">revert</text>
+
+      <!-- branch -->
+      <path class="edge" marker-end="url(#arrow)" filter="url(#sketch2)" d="M320,762 L320,796 L180,796 L180,828"/>
+      <path class="edge" marker-end="url(#arrow)" filter="url(#sketch2)" d="M320,762 L320,796 L460,796 L460,828"/>
+
+      <!-- merge -->
+      <path class="edge" marker-end="url(#arrow)" filter="url(#sketch2)" d="M180,922 L180,956 L320,956 L320,988"/>
+      <path class="edge" marker-end="url(#arrow)" filter="url(#sketch2)" d="M460,922 L460,956 L320,956 L320,988"/>
+
+      <!-- 1. Problem -->
+      <g>
+        <rect class="n-fill--neutral" x="60" y="24" width="520" height="92" rx="9"/>
+        <rect class="n-outline n-outline--neutral" filter="url(#sketch1)" x="60" y="24" width="520" height="92" rx="9"/>
+        <rect class="n-outline n-outline--neutral" filter="url(#sketch2)" x="60" y="24" width="520" height="92" rx="9" opacity="0.55"/>
+        <circle class="n-badge-circle" cx="78" cy="26" r="13"/>
+        <text class="n-badge-text" x="78" y="30">1</text>
+        <text class="n-title" x="320" y="60">PROBLEM</text>
+        <text class="n-sub" x="320" y="80"><tspan x="320" dy="0">credentials.ts reads process.env,</tspan><tspan x="320" dy="15">but .env is never loaded</tspan></text>
+      </g>
+
+      <!-- 2. dotenv installed -->
+      <g>
+        <rect class="n-fill--neutral" x="60" y="166" width="520" height="64" rx="9"/>
+        <rect class="n-outline n-outline--neutral" filter="url(#sketch1)" x="60" y="166" width="520" height="64" rx="9"/>
+        <rect class="n-outline n-outline--neutral" filter="url(#sketch2)" x="60" y="166" width="520" height="64" rx="9" opacity="0.55"/>
+        <circle class="n-badge-circle" cx="78" cy="168" r="13"/>
+        <text class="n-badge-text" x="78" y="172">2</text>
+        <text class="n-title" x="320" y="203">dotenv already installed</text>
+      </g>
+
+      <!-- 3. dotenv.config -->
+      <g>
+        <rect class="n-fill--neutral" x="60" y="280" width="520" height="88" rx="9"/>
+        <rect class="n-outline n-outline--neutral" filter="url(#sketch1)" x="60" y="280" width="520" height="88" rx="9"/>
+        <rect class="n-outline n-outline--neutral" filter="url(#sketch2)" x="60" y="280" width="520" height="88" rx="9" opacity="0.55"/>
+        <circle class="n-badge-circle" cx="78" cy="282" r="13"/>
+        <text class="n-badge-text" x="78" y="286">3</text>
+        <text class="n-title" x="320" y="313">Wire it into playwright.config.ts</text>
+        <text class="n-code" x="320" y="336">dotenv.config({ quiet: true })</text>
+      </g>
+
+      <!-- 4. tried fail-fast -->
+      <g>
+        <rect class="n-fill--warn" x="60" y="418" width="520" height="76" rx="9"/>
+        <rect class="n-outline n-outline--warn" filter="url(#sketch1)" x="60" y="418" width="520" height="76" rx="9" stroke-dasharray="7 5"/>
+        <circle class="n-badge-circle" cx="78" cy="420" r="13"/>
+        <text class="n-badge-text" x="78" y="424">4</text>
+        <text class="n-title" x="320" y="450">TRIED: fail-fast</text>
+        <text class="n-sub" x="320" y="470">requireEnv / assertEnv throws on a missing key</text>
+      </g>
+
+      <!-- 5. 0 tests in 0 files -->
+      <g>
+        <rect class="n-fill--danger" x="60" y="560" width="520" height="76" rx="9"/>
+        <rect class="n-outline n-outline--danger" filter="url(#sketch1)" x="60" y="560" width="520" height="76" rx="9"/>
+        <rect class="n-outline n-outline--danger" filter="url(#sketch2)" x="60" y="560" width="520" height="76" rx="9" opacity="0.55"/>
+        <circle class="n-badge-circle" cx="78" cy="562" r="13"/>
+        <text class="n-badge-text" x="78" y="566">5</text>
+        <text class="n-title" x="320" y="592">"Total: 0 tests in 0 files"</text>
+        <text class="n-sub" x="320" y="612">the throw kills every unrelated spec too</text>
+      </g>
+
+      <!-- 6. reverted fail-soft -->
+      <g>
+        <rect class="n-fill--success" x="60" y="686" width="520" height="76" rx="9"/>
+        <rect class="n-outline n-outline--success" filter="url(#sketch1)" x="60" y="686" width="520" height="76" rx="9"/>
+        <rect class="n-outline n-outline--success" filter="url(#sketch2)" x="60" y="686" width="520" height="76" rx="9" opacity="0.5"/>
+        <circle class="n-badge-circle" cx="78" cy="688" r="13"/>
+        <text class="n-badge-text" x="78" y="692">6</text>
+        <text class="n-title" x="320" y="716">REVERTED: fail soft</text>
+        <text class="n-code" x="320" y="738">STANDARD_USER || 'standard_user'</text>
+      </g>
+
+      <!-- 7. bogus value proof -->
+      <g>
+        <rect class="n-fill--success" x="60" y="830" width="240" height="92" rx="9"/>
+        <rect class="n-outline n-outline--success" filter="url(#sketch1)" x="60" y="830" width="240" height="92" rx="9"/>
+        <circle class="n-badge-circle" cx="78" cy="832" r="13"/>
+        <text class="n-badge-text" x="78" y="836">7</text>
+        <text class="n-title" x="180" y="864"><tspan x="180" dy="0">Bogus value</tspan><tspan x="180" dy="16">in .env</tspan></text>
+        <text class="n-sub" x="180" y="900">login fails → proves .env is read</text>
+      </g>
+
+      <!-- 8. env deleted proof -->
+      <g>
+        <rect class="n-fill--success" x="340" y="830" width="240" height="92" rx="9"/>
+        <rect class="n-outline n-outline--success" filter="url(#sketch2)" x="340" y="830" width="240" height="92" rx="9"/>
+        <circle class="n-badge-circle" cx="358" cy="832" r="13"/>
+        <text class="n-badge-text" x="358" y="836">8</text>
+        <text class="n-title" x="460" y="864"><tspan x="460" dy="0">.env deleted</tspan><tspan x="460" dy="16">entirely</tspan></text>
+        <text class="n-sub" x="460" y="900">8 tests still found → proves nothing breaks</text>
+      </g>
+
+      <!-- 9. result -->
+      <g>
+        <rect class="n-fill--accent" x="60" y="990" width="520" height="100" rx="10"/>
+        <rect class="n-outline n-outline--accent" filter="url(#sketch1)" x="60" y="990" width="520" height="100" rx="10"/>
+        <rect class="n-outline n-outline--accent" filter="url(#sketch2)" x="60" y="990" width="520" height="100" rx="10" opacity="0.5"/>
+        <circle class="n-badge-circle" cx="78" cy="992" r="13"/>
+        <text class="n-badge-text" x="78" y="996">9</text>
+        <text class="n-title" x="320" y="1030">RESULT</text>
+        <text class="n-sub" x="320" y="1050"><tspan x="320" dy="0">.env drives real values when present,</tspan><tspan x="320" dy="16">a working default when it's not</tspan></text>
+      </g>
+    </svg>
+    <figcaption>Warm boxes are the detour; green boxes are what actually shipped and why it's provably safe.</figcaption>
+  </figure>
+
+  <section>
+    <ol class="legend">
+      <li><span><b>Problem.</b> <code>credentials.ts</code> read <code>STANDARD_USER</code>/<code>TTA_SECRET</code> from <code>process.env</code>, but nothing ever called <code>dotenv.config()</code> — every run needed manual shell exports.</span></li>
+      <li><span><b>Checked first.</b> <code>dotenv@17.4.2</code> was already a devDependency and already imported (unused) in <code>playwright.config.ts</code>. No install needed.</span></li>
+      <li><span><b>Loaded it in the config, not a spec.</b> <code>playwright.config.ts</code> runs once, before any spec is collected, so every later <code>process.env</code> read is guaranteed to see <code>.env</code>. <code>quiet: true</code> silences dotenv v17's promo banner.</span></li>
+      <li><span class="tag tag--warn">tried</span><b>Fail-fast.</b> A <code>requireEnv</code>/<code>assertEnv</code> util that threw on a missing key, called at module scope in the spec — looked correct in isolation.</span></li>
+      <li><span class="tag tag--danger">found</span><b>The hazard.</b> Removing <code>.env</code> and running the whole suite printed <code>Total: 0 tests in 0 files</code> — a collection-time throw kills every spec, not just the one that threw.</span></li>
+      <li><span class="tag tag--success">shipped</span><b>Fail soft instead.</b> <code>credentials.ts</code> now falls back to real, working demo credentials with <code>||</code> (not <code>??</code>, so empty strings fall through too).</span></li>
+      <li><span class="tag tag--success">proof</span><b>Precedence, proven.</b> Setting a bogus <code>STANDARD_USER</code> in <code>.env</code> makes login actually fail — confirming <code>.env</code> is read, not just the fallback.</span></li>
+      <li><span class="tag tag--success">proof</span><b>Safety, proven.</b> Deleting <code>.env</code> entirely still collects all 8 tests and the spec still passes, on the fallback.</span></li>
+      <li><span class="tag tag--accent">result</span><b>Nothing left that can throw at load time.</b> The old util was deleted outright — no callers, no reason to keep it.</span></li>
+    </ol>
+  </section>
+
+  <section class="proofs">
+    <div class="proof-card">
+      <h3>Proof 1 — .env is actually read</h3>
+      <p>A value that can't possibly be a real account, set only in the file:</p>
+      <pre>STANDARD_USER=env_proof_user
+&gt; login fails</pre>
+    </div>
+    <div class="proof-card">
+      <h3>Proof 2 — nothing can break</h3>
+      <p>Remove the file altogether and re-collect:</p>
+      <pre>mv .env .env.hidden
+npx playwright test --list
+&gt; Total: 8 tests in 8 files</pre>
+    </div>
+  </section>
+
+  <div class="rule">
+    <span class="eyebrow">Reusable rule</span>
+    <p>
+      Load <code>dotenv</code> once, in the framework's config file, never inline in a spec —
+      config files run before spec collection, so there's no import-order race. And before adding
+      a load-time throw anywhere, run the full suite with the file it depends on removed: a
+      gitignored <code>.env</code> means "missing" isn't hypothetical — it's what every fresh
+      clone looks like.
+    </p>
+  </div>
+
+  <footer>Companion diagram for learnings/tooltip_env.md</footer>
+</main>

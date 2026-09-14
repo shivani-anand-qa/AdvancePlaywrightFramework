@@ -1,6 +1,8 @@
 import { defineConfig, devices } from '@playwright/test';
 import dotenv from 'dotenv';
 
+dotenv.config({ quiet: true });
+
 const ATTACH_SCREENSHOTS = process.env.ATTACH_SCREENSHOTS?.toLowerCase() === 'true';
 
 function resolveBaseURL(): string {

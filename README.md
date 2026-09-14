@@ -25,7 +25,8 @@ src/
     logintestdata.json  Shared password + all TTACart usernames
   tests/
     login/        Login spec(s) against the raw Page Objects
-    e2e/          End-to-end specs (checkout flow, fixture-driven login/inventory/cart)
+    e2e/          End-to-end specs (checkout flow, .env-sourced twin, fixture-driven
+                   login/inventory/cart)
   utils/
     UtilElementLocator.ts  Wraps Playwright locators/actions with logging
     CustomReporter.ts      Custom Playwright HTML reporter
@@ -33,6 +34,9 @@ src/
     visualStep.ts          test.step wrapper that optionally attaches screenshots
     logger.ts              winston logger factory
 playwright.config.ts
+.env.example    Template listing every env var the project reads (`.env` itself is gitignored)
+docs/           Supporting diagrams, e.g. env-detour-diagram.html
+learnings/      Write-ups of non-obvious decisions, e.g. tooltip_env.md
 ```
 
 ### Fixtures (`src/fixtures/test-base.ts`)
@@ -91,15 +95,16 @@ BASE_URL=http://localhost:3000 npx playwright test
 
 Supported `TTA_ENV` values: `qa`, `dev`/`local`, `stg`/`stage`/`staging`, `prod`/`production`, `api`.
 
-`src/tests/e2e/e2e-checkout.spec.ts` logs in via `src/config/credentials.ts`, which reads the standard-user login from env vars — export these before running it:
+`src/tests/e2e/e2e-checkout.spec.ts` and `src/tests/e2e/e2e-checkout-env.spec.ts` log in via `src/config/credentials.ts`, which reads `STANDARD_USER`/`TTA_SECRET`. `playwright.config.ts` calls `dotenv.config()` on startup, so a `.env` file at the repo root (copy `.env.example` to get started) is picked up automatically — no shell exports needed:
 
 ```bash
-export STANDARD_USER=standard_user
-export TTA_SECRET=tta_secret
-npx playwright test src/tests/e2e/e2e-checkout.spec.ts
+cp .env.example .env   # first time only
+npx playwright test src/tests/e2e/e2e-checkout-env.spec.ts
 ```
 
-(`src/tests/e2e/e2e_usingfixture.spec.ts` doesn't need these — it gets its credentials from `src/testdata/logintestdata.json` instead.)
+If `.env` is missing or a key is unset, `credentials.ts` falls back to the site's own demo credentials (`standard_user`/`tta_secret`), so a missing `.env` degrades gracefully instead of breaking the run — see `learnings/tooltip_env.md` for how that was decided, including a fail-fast approach that was tried and reverted because it could crash the entire suite's collection, not just one spec.
+
+(`src/tests/e2e/e2e_usingfixture.spec.ts` gets its credentials from `src/testdata/logintestdata.json` instead and doesn't touch this path.)
 
 Other env vars:
 
