@@ -1,13 +1,6 @@
 import { expect, Locator, Page } from '@playwright/test';
 import { BasePage } from './BasePage';
 
-/**
- * TTACart login screen.
- *
- *   const login = new LoginPage(page);
- *   await login.open();
- *   await login.loginAs('standard_user', 'tta_secret');
- */
 
 export class LoginPage extends BasePage {
 

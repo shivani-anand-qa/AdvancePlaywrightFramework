@@ -28,6 +28,8 @@ export class InventoryPage extends BasePage {
         await this.assertLoaded();
     }
 
+    // Verifies actual page content (title text, item count), not just DOM/network
+    // readiness — generic wait utilities can't express these page-specific checks.
     async assertLoaded(): Promise<void> {
         await expect(this.title).toHaveText('Products');
         await expect.poll(async () => this.items.count()).toBeGreaterThan(3);

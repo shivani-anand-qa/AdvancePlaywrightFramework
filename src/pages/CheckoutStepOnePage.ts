@@ -7,8 +7,8 @@ import type { CheckoutCustomer as GuestUser } from '@utils/DataGenerator';
  *
  * problem_user quirk: the first valid submit clears `firstName` and shows
  * an inline error. Specs that exercise problem_user just submit twice; this
- * POM does NOT hide the quirk because the lesson uses it to demonstrate
- * dealing with flaky UIs.
+ * POM intentionally does NOT retry or hide the quirk internally - the spec
+ * is responsible for detecting the error state and resubmitting.
  */
 export class CheckoutStepOnePage extends BasePage {
     static readonly PATH = '/playwright/ttacart/checkout-step-one';
@@ -60,8 +60,8 @@ export class CheckoutStepOnePage extends BasePage {
     }
 
     /**
-     * Read-only access to the firstName value. Used by tests that check the
-     * problem_user "auto-clear on continue" behaviour.
+     * Read-only access to the firstName value. Used by tests that check for
+     * the problem_user "auto-clear on continue" behaviour.
      */
     async firstNameValue(): Promise<string> {
         return this.el.getValue(this.firstNameInput);

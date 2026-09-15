@@ -13,11 +13,6 @@ export const DEFAULT_ACTION_TIMEOUT_MS = 15_000;
 
 /**
  * Flex - a selector can be a CSS string or an already-built Locator.
- *
- * The TTACart suite uses `data-test` attributes everywhere, so most call sites
- * pass either:
- *   - `'[data-test="username"]'`  (a CSS string), or
- *   - `page.getByTestId('username')` (a Locator object).
  */
 
 export type Flex = string | Locator;
@@ -159,9 +154,6 @@ export class UtilElementLocator {
         this.log.debug('waitForPageLoad');
         await this.page.waitForLoadState('domcontentloaded');
         await this.page.waitForLoadState('networkidle').catch(() => {
-            // TTACart is static + localStorage so networkidle is fast,
-            // but we swallow the rare timeout so the test isn't punished
-            // by background analytics calls on the demo origin.
             this.log.warn('waitForPageLoad: networkidle timed out, continuing anyway');
         });
     }

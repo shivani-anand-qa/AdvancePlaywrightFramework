@@ -1,13 +1,7 @@
 import { expect, Locator, Page } from '@playwright/test';
 import { BasePage } from './BasePage';
 
-/**
- * TTACart "Checkout: Complete!" page — the order confirmation screen.
- *
- *   const complete = new CheckoutCompletePage(page);
- *   await complete.assertOrderComplete();
- *   await complete.backHome();
- */
+
 export class CheckoutCompletePage extends BasePage {
     static readonly PATH = '/playwright/ttacart/checkout-complete';
 

@@ -1,14 +1,7 @@
 import { expect, Locator, Page } from '@playwright/test';
 import { BasePage } from './BasePage';
 
-/**
- * TTACart "Your Cart" page.
- *
- *   const cart = new CartPage(page);
- *   await cart.open();
- *   await cart.removeItem('tta-practice-backpack');
- *   await cart.checkout();
- */
+
 export class CartPage extends BasePage {
     static readonly PATH = '/playwright/ttacart/cart';
 

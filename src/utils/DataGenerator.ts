@@ -1,18 +1,3 @@
-/**
- * DataGenerator — Faker-backed fake data for the TTACart project.
- *
- * TTACart is a SauceDemo-style storefront: it needs login credentials and
- * checkout customer info (first name, last name, postal code). This util
- * centralises all random data so tests stay deterministic-friendly (one
- * import) and read naturally.
- *
- * Faker v8 API notes (project is CommonJS, so we pin the dual CJS/ESM v8):
- *   - `faker.internet.userName()`        (lowercase `username()` is v9+ only)
- *   - `faker.internet.password({length})` (v8 options-object form; avoids the
- *      deprecated positional overload)
- *   - `faker.location.zipCode()`         (v8 renamed `address` -> `location`)
- */
-
 import { faker } from '@faker-js/faker';
 
 export interface Credentials {

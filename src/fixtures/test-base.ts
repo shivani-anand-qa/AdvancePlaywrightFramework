@@ -6,16 +6,6 @@
  *
  * Instead of `new LoginPage(page)` in each spec, ask for the page you need and
  * it's handed over already constructed against the test's `page`:
- *
- *   import { test, expect } from '@fixtures/test-base';
- *
- *   test('add to cart', async ({ inventoryPage, cartPage }) => {
- *       await inventoryPage.open();
- *       await inventoryPage.addToCart('tta-bike-light');
- *       await cartPage.open();
- *       expect(await cartPage.rowCount()).toBe(1);
- *   });
- *
  * Plain page-object fixtures hand over constructed objects without navigating.
  * State fixtures (`invalidLogin`, `validLogin`, `loginWithInventory`, and
  * `loginWithSelectedItem`) perform reusable setup only when a test requests one.

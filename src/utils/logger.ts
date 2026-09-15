@@ -1,6 +1,4 @@
 /**
- * logger — Winston-backed logging for the TTACart framework.
- *
  * Two ways to use it:
  *   - `logger`              -> the shared root logger (framework-wide messages)
  *   - `createLogger(scope)` -> a child logger tagged with a scope label, so
