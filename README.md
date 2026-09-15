@@ -31,7 +31,9 @@ src/
     01_restfulbooker_raw/  API specs against restful-booker.herokuapp.com (ping,
                             CRUD flow, isolated-context requests, ...)
   utils/
-    UtilElementLocator.ts  Wraps Playwright locators/actions with logging
+    UtilElementLocator.ts  Wraps Playwright locators/actions with logging, incl.
+                           waitForPageLoad() (networkidle, swallowed on timeout)
+                           used by BasePage.goto()
     CustomReporter.ts      Custom Playwright HTML reporter
     DataGenerator.ts       Faker-backed test data generation helpers
     visualStep.ts          test.step wrapper that optionally attaches screenshots
@@ -104,6 +106,17 @@ npx playwright test --project=chromium
 ```
 
 A file only becomes a runnable test if it (a) sits under one of those two `testDir`s and (b) is named with a literal `.spec.ts` or `.test.ts` segment (e.g. `foo.spec.ts` — `foo_spec.ts` is invisible to Playwright's default discovery, no error, it's just silently not picked up).
+
+### Test tags
+
+Every `src/tests/e2e/*.spec.ts` suite prefixes its `test.describe` title with plain-text tags (e.g. `@P0 @Regression E2E @Login ...`, `@P0 @Regression E2E @Checkout ...`) so subsets can be run with Playwright's `--grep`:
+
+```bash
+npx playwright test --grep "@Login"
+npx playwright test --grep "@P0"
+```
+
+These are naming-convention tags in the title, not Playwright's native `tag` option — there's no dedicated `--project`/config wiring for them.
 
 ### Environment
 

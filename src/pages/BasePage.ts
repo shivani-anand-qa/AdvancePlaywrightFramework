@@ -28,6 +28,6 @@ export abstract class BasePage {
 
     protected async goto(relativePath: string): Promise<void> {
         await this.page.goto(relativePath);
-        await this.page.waitForLoadState('domcontentloaded');
+        await this.el.waitForPageLoad();
     }
 }

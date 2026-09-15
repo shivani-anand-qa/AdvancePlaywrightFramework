@@ -162,6 +162,7 @@ export class UtilElementLocator {
             // TTACart is static + localStorage so networkidle is fast,
             // but we swallow the rare timeout so the test isn't punished
             // by background analytics calls on the demo origin.
+            this.log.warn('waitForPageLoad: networkidle timed out, continuing anyway');
         });
     }
 

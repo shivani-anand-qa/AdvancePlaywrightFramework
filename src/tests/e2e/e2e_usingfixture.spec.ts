@@ -5,7 +5,7 @@ const log = createLogger('e2e-usingfixture');
 
 const FIRST_ITEM_ID = 'test-allthethings-tshirt-red';
 
-test.describe('@Login E2E Login via fixtures', () => {
+test.describe('@P0 @Regression E2E @Login E2E Login via fixtures', () => {
 
     test('shows an error with invalid credentials', async ({ invalidLogin }) => {
         log.info('Verifying the rejection error message');
