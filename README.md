@@ -28,9 +28,12 @@ src/
     e2e/          End-to-end specs (checkout flow, .env-sourced twin, fixture-driven
                    login/inventory/cart)
   api/
-    01_restfulbooker_raw/  API specs against restful-booker.herokuapp.com (ping,
-                            CRUD flow, isolated-context requests, ...)
+    01_restfulbooker_raw/  API specs against restful-booker.herokuapp.com, numbered
+                            in learning order: 00 ping, 02 POST, 03 isolated-context
+                            requests, 04 PUT (auth token + update), 05 full CRUD flow
   utils/
+    APIHelper.ts           Placeholder for a generic GET/POST/PUT/PATCH/DELETE helper
+                           to share across API specs (not implemented yet)
     UtilElementLocator.ts  Wraps Playwright locators/actions with logging, incl.
                            waitForPageLoad() (networkidle, swallowed on timeout)
                            used by BasePage.goto()
