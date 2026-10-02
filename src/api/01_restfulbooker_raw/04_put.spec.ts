@@ -13,7 +13,7 @@ test.describe('Restful Booker booking API', () => {
             firstname: 'Shivani',
             lastname: 'Anand',
             totalprice: 111,
-            depositepaid: true,
+            depositpaid: true,
             bookingdates: {
                 checkin: '2018-01-01',
                 checkout: '2019-01-01',
