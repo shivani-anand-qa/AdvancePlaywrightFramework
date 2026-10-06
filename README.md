@@ -27,13 +27,16 @@ src/
     login/        Login spec(s) against the raw Page Objects
     e2e/          End-to-end specs (checkout flow, .env-sourced twin, fixture-driven
                    login/inventory/cart)
-  api/
-    01_restfulbooker_raw/  API specs against restful-booker.herokuapp.com, numbered
-                            in learning order: 00 ping, 02 POST, 03 isolated-context
-                            requests, 04 PUT (auth token + update), 05 full CRUD flow
+    apitests/     API specs against restful-booker.herokuapp.com (run by the `api` project)
+      01_restfulbooker_raw/       Raw `request` calls, numbered in learning order:
+                                  00 ping, 02 POST, 03 isolated-context requests,
+                                  04 PUT (auth token + update), 05 full CRUD flow
+      02_restfulbooker_apiHelper/ The same calls routed through APIHelper:
+                                  create-booking (POST), update-booking (PUT + Cookie token)
   utils/
-    APIHelper.ts           Placeholder for a generic GET/POST/PUT/PATCH/DELETE helper
-                           to share across API specs (not implemented yet)
+    APIHelper.ts           Generic GET/POST/PUT/PATCH/DELETE wrapper shared by API specs,
+                           with query params, retry/polling, typed JSON parsing and
+                           status helpers (see below)
     UtilElementLocator.ts  Wraps Playwright locators/actions with logging, incl.
                            waitForPageLoad() (networkidle, swallowed on timeout)
                            used by BasePage.goto()
@@ -73,6 +76,29 @@ Plain page-object fixtures (`loginPage`, `inventoryPage`, `itemDetailPage`, `car
 
 See `src/tests/e2e/e2e_usingfixture.spec.ts` for usage of each.
 
+### API helper (`src/utils/APIHelper.ts`)
+
+`APIHelper` wraps either a `Page` or an `APIRequestContext`, so the same helper works in browser and API-only specs. Relative URLs resolve against the project's `baseURL`:
+
+```ts
+import { APIHelper } from '@utils/APIHelper';
+
+test('create a booking', async ({ request }) => {
+    const api = new APIHelper(request);
+    const response = await api.post('/booking', payload);
+    expect(api.isSuccess(response)).toBe(true);
+    const body = await api.parseJsonResponse<{ bookingid: number }>(response);
+});
+```
+
+| Method | Purpose |
+| --- | --- |
+| `get` / `post` / `put` / `patch` / `delete` | Shorthands over `callApi()`; accept `headers`, `params` (query string) and `timeout` |
+| `callApi(options)` | Single entry point taking `{ url, method, headers, data, params, timeout }` |
+| `callApiWithRetry(options, { condition, pollingInterval, retryCount })` | Re-sends until `condition(response)` is true (defaults: 3 tries, 5s apart) and returns the last response |
+| `parseJsonResponse<T>(response)` | Typed `response.json()` |
+| `isSuccess` / `isFailureClient` | 2xx / 4xx status checks |
+
 ## Getting started
 
 ```bash
@@ -98,8 +124,8 @@ There are two Playwright projects, each scoped to its own `testDir` so browser a
 
 | Project | `testDir` | What runs there |
 | --- | --- | --- |
-| `chromium` | `src/tests` | The TTACart UI suite (headed Chrome) |
-| `api` | `src/api` | Pure API specs (`request` fixture only, no browser) against `restful-booker.herokuapp.com` |
+| `chromium` | `src/tests` (ignores `apitests/`) | The TTACart UI suite (headed Chrome) |
+| `api` | `src/tests/apitests` | Pure API specs (`request` fixture only, no browser) against `restful-booker.herokuapp.com` (override with `API_BASE_URL`) |
 
 Run just one:
 
