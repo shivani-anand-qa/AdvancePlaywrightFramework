@@ -19,6 +19,10 @@ src/
   fixtures/
     test-base.ts  Custom `test`/`expect`, pre-wired with a fixture for every Page
                    Object, plus reusable state fixtures (see below)
+    booker.fixture.ts  `bookingApi` + `bookerToken` fixtures for restful-booker specs
+  api/
+    BookingApi.ts  Service class for restful-booker's auth + booking CRUD endpoints,
+                   built on APIHelper, with a self-renewing auth token (see below)
   config/
     credentials.ts  Login credentials sourced from env vars
   testdata/
@@ -98,6 +102,46 @@ test('create a booking', async ({ request }) => {
 | `callApiWithRetry(options, { condition, pollingInterval, retryCount })` | Re-sends until `condition(response)` is true (defaults: 3 tries, 5s apart) and returns the last response |
 | `parseJsonResponse<T>(response)` | Typed `response.json()` |
 | `isSuccess` / `isFailureClient` | 2xx / 4xx status checks |
+
+### Booking API service (`src/api/BookingApi.ts`)
+
+`BookingApi` sits one level above `APIHelper`: instead of building URLs, headers and cookies in every spec, a spec calls one typed method per restful-booker endpoint. Import `test`/`expect` from `@fixtures/booker.fixture` to get it pre-constructed:
+
+```ts
+import { test, expect } from '@fixtures/booker.fixture';
+
+test('update a booking', async ({ bookingApi }) => {
+    const { bookingid } = await bookingApi.createBooking(payload);
+    const updated = await bookingApi.updateBooking(bookingid, { ...payload, firstname: 'After' });
+    expect(updated.firstname).toBe('After');
+});
+```
+
+| Method | Endpoint | Auth |
+| --- | --- | --- |
+| `auth(username?, password?)` | `POST /auth` → token | — |
+| `getAllBookings(filters?)` | `GET /booking` (optional `firstname`/`lastname`/`checkin`/`checkout` filters) | — |
+| `getBooking(id)` | `GET /booking/{id}` | — |
+| `createBooking(payload)` | `POST /booking` | — |
+| `updateBooking(id, payload, token?)` | `PUT /booking/{id}` | Cookie token |
+| `patchBooking(id, partial, token?)` | `PATCH /booking/{id}` | Cookie token |
+| `deleteBooking(id, token?)` | `DELETE /booking/{id}` → status code | Cookie token |
+
+Typed methods throw on a non-2xx response. For negative tests, the `*Response` variants (`getBookingResponse`, `createBookingResponse`, `updateBookingResponse`) return the raw `APIResponse` so a spec can assert a 403, 404 or 500 itself.
+
+**Token handling.** Leave out the `token` argument and `BookingApi` uses a token it manages itself: it logs in on first use, caches the token, and if the server rejects it with a 403, logs in once more and retries. Pass a `token` explicitly and it's sent as-is with no retry, so a negative test can still assert the 403. Two restful-booker quirks this handles:
+
+- An expired or invalid token gets **403**, never 401.
+- Bad credentials on `POST /auth` still return **200**, with `{ "reason": "Bad credentials" }` instead of a token, so `auth()` checks the body for a token rather than trusting the status.
+
+**Fixtures (`src/fixtures/booker.fixture.ts`):**
+
+| Fixture | Provides |
+| --- | --- |
+| `bookingApi` | A `BookingApi` built on the test's `request` context |
+| `bookerToken` | A token from `POST /auth`, for specs that need the value itself (to log, pass on or assert on) |
+
+`bookerToken` is resolved once before the test body runs, so it can't recover from a token that expires mid-test. Mutating calls that leave out `token` handle that case on their own.
 
 ## Getting started
 

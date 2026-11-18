@@ -29,17 +29,18 @@ test.describe('@P0 @regression Level 2 (APIHelper) - PUT update booking', () => 
                 totalprice: 880,
                 depositpaid: true,
                 bookingdates: { checkin: '2026-05-02', checkout: '2026-05-09' },
-                additionaldates: 'Extra bed',
+                additionalneeds: 'Extra bed',
             },
-            { headers: { Cookie: `token= ${token}` } },
+            { headers: { Cookie: `token=${token}` } },
         );
 
         expect(api.isSuccess(response)).toBe(true);
-        const updated = await api.parseJsonResponse<{ firstname: string, totalprice: number }>(
+        const updated = await api.parseJsonResponse<{ firstname: string, totalprice: number, additionalneeds: string }>(
             response,
         );
         expect(updated.firstname).toBe('After');
         expect(updated.totalprice).toBe(880);
+        expect(updated.additionalneeds).toBe('Extra bed');
 
     });
 });

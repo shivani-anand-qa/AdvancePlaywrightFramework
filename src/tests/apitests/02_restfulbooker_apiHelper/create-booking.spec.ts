@@ -21,7 +21,7 @@ test.describe('@P0 regression Level 2 (ApiHelper)- POST create booking', () => {
             firstname: 'Helper',
             lastname: 'Creator',
             totalprice: 640,
-            depositpaid: 640,
+            depositpaid: true,
             bookingdates: { checkin: '2026-04-01', checkout: '2026-04-10' },
             additionalneeds: 'Breakfast',
         };
@@ -51,6 +51,7 @@ test.describe('@P0 regression Level 2 (ApiHelper)- POST create booking', () => {
             expect(body.bookingid).toBeGreaterThan(0);
             expect(body.booking.firstname).toBe(payload.firstname);
             expect(body.booking.totalprice).toBe(payload.totalprice);
+            expect(body.booking.depositpaid).toBe(payload.depositpaid);
             log.info(`Step 2: booking ${body.bookingid} verified OK`);
         });
     });
