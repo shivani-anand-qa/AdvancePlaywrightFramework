@@ -1,4 +1,6 @@
 # Advanced Playwright Framework
+[![Playwright](https://img.shields.io/badge/Playwright-1.62.1-2EAD33?logo=playwright&logoColor=white)](https://playwright.dev/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-blue?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 
 A TypeScript Playwright test automation framework for the TTACart demo app, built around the Page Object Model with a shared element-action wrapper, environment-based configuration, and a custom HTML test reporter.
 
